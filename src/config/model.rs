@@ -1480,12 +1480,12 @@ startup_per_agent_delay_ms = 0
         assert!(Config::default().agents.is_empty());
 
         let toml = r#"
-[agents.codex]
+[agents.jcode]
 args = ["--provider", "openai-compatible", "--model", "MiniMax-M3.1-Flash-Preview"]
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(
-            config.agents.get("codex").unwrap().args,
+            config.agents.get("jcode").unwrap().args,
             vec![
                 "--provider",
                 "openai-compatible",
@@ -1498,7 +1498,7 @@ args = ["--provider", "openai-compatible", "--model", "MiniMax-M3.1-Flash-Previe
     #[test]
     fn agent_default_args_report_unknown_agent_kind_without_failing() {
         let toml = r#"
-[agents.codex]
+[agents.jcode]
 args = ["--model", "A"]
 
 [agents.not-an-agent]
@@ -1513,7 +1513,7 @@ args = ["--model", "B"]
         assert!(diagnostics[0].contains("not-an-agent"));
         assert!(!diagnostics
             .iter()
-            .any(|diagnostic| diagnostic.contains("codex")));
+            .any(|diagnostic| diagnostic.contains("jcode")));
     }
 
     #[test]

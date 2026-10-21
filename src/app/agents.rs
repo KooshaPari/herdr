@@ -536,10 +536,10 @@ mod tests {
 
     #[test]
     fn config_defaults_precede_user_args() {
-        let configured = configured_args(&[("codex", &["--provider", "openai-compatible"])]);
+        let configured = configured_args(&[("jcode", &["--provider", "openai-compatible"])]);
         let user = vec!["--model".to_string(), "MiniMax-M3".to_string()];
         assert_eq!(
-            combined_agent_args(&configured, Agent::Codex, &user),
+            combined_agent_args(&configured, Agent::Jcode, &user),
             vec!["--provider", "openai-compatible", "--model", "MiniMax-M3"]
         );
     }
@@ -553,12 +553,12 @@ mod tests {
 
     #[test]
     fn later_user_flag_wins_over_config_default() {
-        let configured = configured_args(&[("codex", &["--model", "A"])]);
+        let configured = configured_args(&[("jcode", &["--model", "A"])]);
         let user = vec!["--model".to_string(), "B".to_string()];
         // Duplicates are preserved and the user's later value stays last, so a
         // CLI's "last wins" behavior applies the user override.
         assert_eq!(
-            combined_agent_args(&configured, Agent::Codex, &user),
+            combined_agent_args(&configured, Agent::Jcode, &user),
             vec!["--model", "A", "--model", "B"]
         );
     }

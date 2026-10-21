@@ -308,18 +308,10 @@ pub fn plan(source: &str, agent: &str, session_ref: &AgentSessionRef) -> Option<
             }
         }
         ("herdr:kcode", "kcode", AgentSessionRefKind::Id) => {
-            vec![
-                "kcode".into(),
-                "--resume".into(),
-                session_ref.value.clone(),
-            ]
+            vec!["kcode".into(), "--resume".into(), session_ref.value.clone()]
         }
         ("herdr:jcode", "jcode", AgentSessionRefKind::Id) => {
-            vec![
-                "jcode".into(),
-                "--resume".into(),
-                session_ref.value.clone(),
-            ]
+            vec!["jcode".into(), "--resume".into(), session_ref.value.clone()]
         }
         _ => return None,
     };
