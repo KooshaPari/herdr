@@ -181,6 +181,10 @@ impl App {
         {
             return Err(AgentStartError::InvalidArgument);
         }
+        // Deliberate: resume detection sees the combined (config-default + user)
+        // args, because config defaults are part of the effective launch command.
+        // A configured `resume <id>` must be tracked exactly like a user-supplied
+        // one; with empty defaults this is byte-identical to the prior behavior.
         let launch_args = combined_agent_args(&self.agent_default_args, kind, &params.args);
         let persisted_agent_session =
             crate::agent_resume::persisted_session_from_launch_args(kind, &launch_args);
