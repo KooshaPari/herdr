@@ -13,6 +13,18 @@
       ]
     },
     {
+      "id": "agents",
+      "title": "Agents",
+      "keys": [
+        {
+          "key": "agents",
+          "type": "table of agent args",
+          "default": "{}",
+          "description": "Per-agent-kind default CLI args keyed by canonical agent kind (e.g. [agents.codex] args = [\"--model\", \"...\"]). Defaults are prepended to every launch of that kind; user-supplied --args are appended after them, so a later user flag overrides an earlier default flag. Unknown agent kinds are ignored with a diagnostic."
+        }
+      ]
+    },
+    {
       "id": "server",
       "title": "Server",
       "keys": [
