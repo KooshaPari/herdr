@@ -1863,6 +1863,21 @@ mod tests {
     }
 
     #[test]
+    fn live_reload_updates_agent_default_args() {
+        let mut app = test_app();
+        let config: Config =
+            toml::from_str("[agents.codex]\nargs = [\"--model\", \"A\"]\n").unwrap();
+
+        let report = app.apply_live_config(&config, &[], &[], false);
+
+        assert_eq!(report.status, crate::config::ConfigReloadStatus::Applied);
+        assert_eq!(
+            app.agent_default_args_for(Agent::Codex),
+            ["--model".to_string(), "A".to_string()]
+        );
+    }
+
+    #[test]
     fn reload_config_requests_client_reload_for_key_only_change() {
         let _guard = config_env_lock().lock().unwrap();
         let path = temp_config_path("reload-config-key-only");
@@ -2985,6 +3000,48 @@ mod tests {
         assert_eq!(response["error"]["code"], "agent_pane_unavailable");
         assert_eq!(app.state.workspaces[0].tabs[0].layout.pane_count(), 1);
         assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(root));
+    }
+
+    #[tokio::test]
+    async fn agent_start_prepends_configured_default_args_before_user_args() {
+        let mut app = test_app();
+        let workspace = Workspace::test_new("agent-default-args");
+        let root = workspace.tabs[0].root_pane;
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        let pane_id = app.pane_info(0, root).unwrap().pane_id;
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&root]
+            .attached_terminal_id
+            .clone();
+        let (runtime, _receiver) =
+            crate::terminal::TerminalRuntime::test_with_channel_capacity(80, 24, 1);
+        app.terminal_runtimes.insert(terminal_id.clone(), runtime);
+        app.agent_default_args.insert(
+            "codex".into(),
+            crate::config::AgentArgsConfig {
+                args: vec!["--model".into(), "A".into()],
+            },
+        );
+
+        let response = app.handle_api_request(crate::api::schema::Request {
+            id: "req_agent_default_args".into(),
+            method: crate::api::schema::Method::AgentStart(crate::api::schema::AgentStartParams {
+                name: "worker".into(),
+                kind: "codex".into(),
+                pane_id,
+                args: vec!["--model".into(), "B".into()],
+                timeout_ms: Some(4_000),
+            }),
+        });
+        let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+
+        assert_eq!(response["result"]["type"], "agent_started");
+        assert_eq!(
+            response["result"]["argv"],
+            serde_json::json!(["codex", "--model", "A", "--model", "B"])
+        );
     }
 
     #[tokio::test]

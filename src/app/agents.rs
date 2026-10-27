@@ -19,6 +19,17 @@ fn valid_agent_name(name: &str) -> bool {
         && chars.all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, '-' | '_'))
 }
 
+/// Config default args for `kind` (empty slice when unconfigured).
+fn configured_default_args(
+    configured: &std::collections::BTreeMap<String, crate::config::AgentArgsConfig>,
+    kind: crate::detect::Agent,
+) -> &[String] {
+    configured
+        .get(crate::detect::agent_label(kind))
+        .map(|config| config.args.as_slice())
+        .unwrap_or(&[])
+}
+
 /// Build the final argv (minus the executable) for an agent launch.
 ///
 /// Config-default args come first, user-supplied args follow, so a later
@@ -29,15 +40,18 @@ fn combined_agent_args(
     kind: crate::detect::Agent,
     user_args: &[String],
 ) -> Vec<String> {
-    let defaults = configured
-        .get(crate::detect::agent_label(kind))
-        .map(|config| config.args.as_slice())
-        .unwrap_or(&[]);
-    defaults
+    configured_default_args(configured, kind)
         .iter()
         .cloned()
         .chain(user_args.iter().cloned())
         .collect()
+}
+
+impl App {
+    /// Config default args for `kind`, used by both fresh launches and restore.
+    pub(super) fn agent_default_args_for(&self, kind: crate::detect::Agent) -> &[String] {
+        configured_default_args(&self.agent_default_args, kind)
+    }
 }
 
 impl App {
