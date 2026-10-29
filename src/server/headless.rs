@@ -406,6 +406,13 @@ impl HeadlessServer {
             server_stop.request(ShutdownReason::Signal(signal));
             let _ = quit_notify.try_send(ServerEvent::QuitSignal);
         });
+        // A termination signal that arrived while the server was still starting
+        // up was recorded instead of killing the process. Honour it now, so the
+        // server still stops through the graceful shutdown path.
+        if let Some(signal) = crate::platform::take_early_termination_signal() {
+            self.server_stop.request(ShutdownReason::Signal(signal));
+            let _ = self.server_event_tx.try_send(ServerEvent::QuitSignal);
+        }
         let quit_notify = self.server_event_tx.clone();
         let _host_shutdown = crate::platform::HostShutdownMonitor::start(
             self.host_shutdown_requested.clone(),

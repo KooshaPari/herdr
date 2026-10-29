@@ -3,6 +3,10 @@ use super::*;
 /// Run the headless server. This is the entry point called from main.rs.
 pub fn run_server() -> io::Result<()> {
     crate::platform::ignore_server_hangup();
+    // Startup takes seconds, and the tokio signal monitor only starts once the
+    // event loop runs. Without this, a SIGTERM during startup kills the server
+    // with the default disposition, skipping the graceful shutdown path.
+    crate::platform::defer_early_termination_signals();
     let args: Vec<String> = std::env::args().collect();
     let handoff_import = args.get(2).map(String::as_str) == Some("--handoff-import");
     let process_context = crate::platform::prepare_server_process(handoff_import);

@@ -289,6 +289,56 @@ pub(crate) fn ignore_server_hangup() {
     }
 }
 
+/// Keeps SIGTERM and SIGINT from killing the server with their default
+/// disposition while it is still starting up.
+///
+/// Server startup takes seconds (config load, session restore, plugin
+/// registry). The tokio signal monitor that routes these signals to the
+/// graceful shutdown path only starts once the event loop runs, so a signal
+/// arriving during startup would otherwise kill the process outright and skip
+/// the shutdown log and the final session save.
+///
+/// The handler records the signal instead of discarding it;
+/// [`take_early_termination_signal`] hands it to the shutdown path once the
+/// monitor is up, so the server still stops gracefully.
+pub(crate) fn defer_early_termination_signals() {
+    let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+    action.sa_sigaction =
+        record_early_termination_signal as extern "C" fn(libc::c_int) as libc::sighandler_t;
+    action.sa_flags = libc::SA_RESTART;
+    unsafe {
+        libc::sigemptyset(&mut action.sa_mask);
+        libc::sigaction(libc::SIGTERM, &action, std::ptr::null_mut());
+        libc::sigaction(libc::SIGINT, &action, std::ptr::null_mut());
+    }
+}
+
+/// The signal recorded while the server was still starting up, if any.
+static EARLY_TERMINATION_SIGNAL: std::sync::atomic::AtomicI32 =
+    std::sync::atomic::AtomicI32::new(0);
+
+extern "C" fn record_early_termination_signal(signal: libc::c_int) {
+    // Keep the first signal; a later one of the same kind is the same request.
+    EARLY_TERMINATION_SIGNAL
+        .compare_exchange(
+            0,
+            signal,
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+        )
+        .ok();
+}
+
+/// Returns the termination signal that arrived during startup, if any.
+pub(crate) fn take_early_termination_signal() -> Option<super::ServerQuitSignal> {
+    let recorded = EARLY_TERMINATION_SIGNAL.swap(0, std::sync::atomic::Ordering::AcqRel);
+    match recorded {
+        libc::SIGTERM => Some(super::ServerQuitSignal::Terminate),
+        libc::SIGINT => Some(super::ServerQuitSignal::Interrupt),
+        _ => None,
+    }
+}
+
 /// Routes SIGINT and SIGTERM to `on_quit`, and logs SIGHUP without stopping.
 pub(crate) fn spawn_server_signal_monitor(
     on_quit: impl Fn(super::ServerQuitSignal) + Send + Sync + 'static,
