@@ -1680,10 +1680,8 @@ mod tests {
         let _guard = crate::config::test_config_env_lock().lock().unwrap();
         let previous_config_home = std::env::var_os("XDG_CONFIG_HOME");
         let previous_state_home = std::env::var_os("XDG_STATE_HOME");
-        let isolated = std::env::temp_dir().join(format!(
-            "herdr-agent-explain-{}",
-            std::process::id()
-        ));
+        let isolated =
+            std::env::temp_dir().join(format!("herdr-agent-explain-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&isolated);
         std::env::set_var("XDG_CONFIG_HOME", isolated.join("config"));
         std::env::set_var("XDG_STATE_HOME", isolated.join("state"));

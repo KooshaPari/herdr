@@ -113,24 +113,47 @@ pub fn cleanup_test_base(base: &Path) {
     let _ = fs::remove_dir_all(base);
 }
 
+/// How long an integration test waits for a spawned server to publish its
+/// sockets. A saturated host can take well over the old fixed 10 seconds to
+/// schedule and start the server process, so the budget is generous and the
+/// poll interval backs off.
+pub const SERVER_SOCKET_WAIT: Duration = Duration::from_secs(60);
+
+/// Wait for a server socket to accept a connection.
+///
+/// The poll interval grows with the elapsed wait so a saturated host still
+/// gets enough chances to schedule the server process, and the effective
+/// deadline is never shorter than the requested timeout.
 pub fn wait_for_socket(path: &Path, timeout: Duration) {
     let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
+    let mut interval = Duration::from_millis(25);
+    loop {
         if path.exists() && UnixStream::connect(path).is_ok() {
             return;
         }
-        thread::sleep(Duration::from_millis(25));
+        if Instant::now() >= deadline {
+            break;
+        }
+        thread::sleep(interval);
+        // Back off up to 250ms: a busy host needs longer between polls, not
+        // a tighter loop that only adds contention.
+        interval = (interval * 2).min(Duration::from_millis(250));
     }
     panic!("socket did not appear at {}", path.display());
 }
 
 pub fn wait_for_file(path: &Path, timeout: Duration) {
     let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
+    let mut interval = Duration::from_millis(25);
+    loop {
         if path.exists() {
             return;
         }
-        thread::sleep(Duration::from_millis(25));
+        if Instant::now() >= deadline {
+            break;
+        }
+        thread::sleep(interval);
+        interval = (interval * 2).min(Duration::from_millis(250));
     }
     panic!("file did not appear at {}", path.display());
 }
@@ -442,13 +465,19 @@ where
     F: FnMut() -> bool,
 {
     let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
+    let mut interval = interval;
+    loop {
         if predicate() {
             return true;
         }
+        if Instant::now() >= deadline {
+            return false;
+        }
         thread::sleep(interval);
+        // Back off up to 250ms so a saturated host gets real scheduling gaps
+        // between polls instead of a busy loop that adds contention.
+        interval = (interval * 2).min(Duration::from_millis(250));
     }
-    predicate()
 }
 
 pub fn wait_for_message_variant(
