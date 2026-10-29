@@ -207,7 +207,10 @@ impl JsonLineReader {
 fn send_request(socket_path: &Path, json: &str) -> serde_json::Value {
     let mut reader = JsonLineReader::connect(socket_path);
     reader.send_line(json);
-    reader.read_json_line(Duration::from_secs(5))
+    // Some requests (a manifest reload, for example) recompile every bundled
+    // rule set. On a loaded host that can take longer than a few seconds, and
+    // the reply is still expected.
+    reader.read_json_line(Duration::from_secs(60))
 }
 
 fn open_subscription(socket_path: &Path, json: &str) -> JsonLineReader {
