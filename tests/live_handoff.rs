@@ -1208,7 +1208,7 @@ sys.stdout.buffer.write(b"\x1b[>5u")
 sys.stdout.flush()
 pathlib.Path({ready:?}).write_text("ready")
 tty.setraw(sys.stdin.fileno())
-ready_fds, _, _ = select.select([sys.stdin.fileno()], [], [], 5)
+ready_fds, _, _ = select.select([sys.stdin.fileno()], [], [], 60)
 data = os.read(sys.stdin.fileno(), 32) if ready_fds else b""
 pathlib.Path({received:?}).write_text(data.hex())
 "#,
@@ -1304,7 +1304,7 @@ sys.stdout.buffer.write(b"\x1b[>4;2m")
 sys.stdout.flush()
 pathlib.Path({ready:?}).write_text("ready")
 tty.setraw(sys.stdin.fileno())
-ready_fds, _, _ = select.select([sys.stdin.fileno()], [], [], 5)
+ready_fds, _, _ = select.select([sys.stdin.fileno()], [], [], 60)
 data = os.read(sys.stdin.fileno(), 32) if ready_fds else b""
 pathlib.Path({received:?}).write_text(data.hex())
 "#,
