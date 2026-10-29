@@ -254,6 +254,15 @@ pub(super) fn read_terminal_grid_size() -> std::io::Result<(u16, u16)> {
 }
 
 fn set_sigpipe_disposition(handler: libc::sighandler_t) {
+    // Unit tests share one process across every test in the binary. A CLI print
+    // helper that flips SIGPIPE to SIG_DFL and never restores it leaves the
+    // default disposition installed for later tests, so a test that writes to a
+    // closed socket kills the whole harness instead of failing. The real CLI
+    // keeps the default disposition so a closed stdout still exits via SIGPIPE
+    // (see tests/broken_pipe.rs, which runs the non-test binary).
+    if cfg!(test) {
+        return;
+    }
     let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
     action.sa_sigaction = handler;
     unsafe {
@@ -561,6 +570,34 @@ pub(crate) fn set_default_plugin_pane_pwd(env: &mut Vec<(String, String)>, cwd: 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cli_output_helpers_do_not_change_sigpipe_disposition_in_tests() {
+        // The test harness shares one process, so a CLI print helper that
+        // installs SIG_DFL would make a later test that writes to a closed
+        // socket kill the whole binary. The helpers must stay inert here.
+        let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+        action.sa_sigaction = libc::SIG_IGN;
+        let mut current: libc::sigaction = unsafe { std::mem::zeroed() };
+        unsafe {
+            libc::sigemptyset(&mut action.sa_mask);
+            libc::sigaction(libc::SIGPIPE, &action, std::ptr::null_mut());
+            libc::sigaction(libc::SIGPIPE, std::ptr::null(), &mut current);
+        }
+        let before = current.sa_sigaction;
+
+        begin_cli_output();
+        end_cli_output();
+
+        let mut after: libc::sigaction = unsafe { std::mem::zeroed() };
+        unsafe {
+            libc::sigaction(libc::SIGPIPE, std::ptr::null(), &mut after);
+        }
+        assert_eq!(
+            after.sa_sigaction, before,
+            "CLI output helpers must not change SIGPIPE inside the test harness"
+        );
+    }
 
     #[test]
     fn server_signal_monitor_survives_hangup_and_reports_terminate() {

@@ -1114,6 +1114,14 @@ mod tests {
         }
     }
 
+    fn restore_xdg_config_home(original: Option<std::ffi::OsString>) {
+        if let Some(value) = original {
+            std::env::set_var("XDG_CONFIG_HOME", value);
+        } else {
+            std::env::remove_var("XDG_CONFIG_HOME");
+        }
+    }
+
     #[test]
     fn git_refresh_deadline_is_suppressed_while_in_flight() {
         let mut app = test_app();
@@ -3265,6 +3273,7 @@ mod tests {
     fn due_session_save_starts_background_writer() {
         let _guard = crate::config::test_config_env_lock().lock().unwrap();
         let config_home = unique_temp_path("background-session-save");
+        let previous_config_home = std::env::var_os("XDG_CONFIG_HOME");
         std::env::set_var("XDG_CONFIG_HOME", &config_home);
         std::env::remove_var(crate::session::SESSION_ENV_VAR);
 
@@ -3281,7 +3290,7 @@ mod tests {
         app.save_session_now();
         assert!(crate::session::data_dir().join("session.json").exists());
 
-        std::env::remove_var("XDG_CONFIG_HOME");
+        restore_xdg_config_home(previous_config_home);
         let _ = std::fs::remove_dir_all(config_home);
     }
 
@@ -3330,6 +3339,7 @@ mod tests {
     async fn pane_exit_checkpoint_survives_automatic_workspace_creation_on_shutdown() {
         let _guard = crate::config::test_config_env_lock().lock().unwrap();
         let config_home = unique_temp_path("signaled-pane-session-checkpoint");
+        let previous_config_home = std::env::var_os("XDG_CONFIG_HOME");
         std::env::set_var("XDG_CONFIG_HOME", &config_home);
         std::env::remove_var(crate::session::SESSION_ENV_VAR);
 
@@ -3359,7 +3369,7 @@ mod tests {
         assert_eq!(snapshot.workspaces.len(), 1);
         assert_eq!(snapshot.workspaces[0].tabs[0].panes.len(), 2);
 
-        std::env::remove_var("XDG_CONFIG_HOME");
+        restore_xdg_config_home(previous_config_home);
         let _ = std::fs::remove_dir_all(config_home);
     }
 
@@ -3367,6 +3377,7 @@ mod tests {
     fn normal_autosave_replaces_a_signaled_exit_checkpoint() {
         let _guard = crate::config::test_config_env_lock().lock().unwrap();
         let config_home = unique_temp_path("signaled-pane-autosave");
+        let previous_config_home = std::env::var_os("XDG_CONFIG_HOME");
         std::env::set_var("XDG_CONFIG_HOME", &config_home);
         std::env::remove_var(crate::session::SESSION_ENV_VAR);
 
@@ -3392,7 +3403,7 @@ mod tests {
 
         assert!(crate::persist::load().is_none());
 
-        std::env::remove_var("XDG_CONFIG_HOME");
+        restore_xdg_config_home(previous_config_home);
         let _ = std::fs::remove_dir_all(config_home);
     }
 
@@ -3400,6 +3411,7 @@ mod tests {
     fn durable_mutation_after_pane_exit_checkpoint_wins_on_shutdown() {
         let _guard = crate::config::test_config_env_lock().lock().unwrap();
         let config_home = unique_temp_path("pane-exit-newer-session-state");
+        let previous_config_home = std::env::var_os("XDG_CONFIG_HOME");
         std::env::set_var("XDG_CONFIG_HOME", &config_home);
         std::env::remove_var(crate::session::SESSION_ENV_VAR);
 
@@ -3433,7 +3445,7 @@ mod tests {
             assert_eq!(snapshot.workspaces[0].custom_name.as_deref(), Some("newer"));
         }
 
-        std::env::remove_var("XDG_CONFIG_HOME");
+        restore_xdg_config_home(previous_config_home);
         let _ = std::fs::remove_dir_all(config_home);
     }
 

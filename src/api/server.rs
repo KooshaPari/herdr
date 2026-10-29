@@ -1172,6 +1172,17 @@ mod tests {
         std::env::temp_dir().join(format!("herdr-{name}-{}-{nanos}", std::process::id()))
     }
 
+    /// Put an environment variable back the way it was found.
+    ///
+    /// Tests share one process, so dropping a variable that was set before the
+    /// test ran leaks that change into every later test in the binary.
+    fn restore_env(key: &str, previous: Option<std::ffi::OsString>) {
+        match previous {
+            Some(value) => std::env::set_var(key, value),
+            None => std::env::remove_var(key),
+        }
+    }
+
     fn read_line(stream: &mut LocalStream) -> String {
         let mut reader = BufReader::new(stream);
         let mut line = String::new();
@@ -1330,6 +1341,13 @@ mod tests {
         let _guard = env_lock().lock().unwrap();
         let config_home = unique_test_path("socket-default-config-home");
         let runtime_dir = unique_test_path("socket-default-runtime");
+        // Restore the previous values instead of dropping them. Clearing
+        // XDG_CONFIG_HOME outright would leak into later tests in the same
+        // process and point them at the developer's real config directory.
+        let previous_config_home = std::env::var_os("XDG_CONFIG_HOME");
+        let previous_runtime_dir = std::env::var_os("XDG_RUNTIME_DIR");
+        let previous_socket_path = std::env::var_os(crate::api::SOCKET_PATH_ENV_VAR);
+        let previous_session = std::env::var_os(crate::session::SESSION_ENV_VAR);
         std::env::remove_var(crate::api::SOCKET_PATH_ENV_VAR);
         std::env::remove_var(crate::session::SESSION_ENV_VAR);
         crate::session::clear_explicit_session_for_test();
@@ -1341,14 +1359,22 @@ mod tests {
             .join("herdr.sock");
         assert_eq!(socket_path(), expected);
 
-        std::env::remove_var("XDG_CONFIG_HOME");
-        std::env::remove_var("XDG_RUNTIME_DIR");
+        restore_env("XDG_CONFIG_HOME", previous_config_home);
+        restore_env("XDG_RUNTIME_DIR", previous_runtime_dir);
+        restore_env(crate::api::SOCKET_PATH_ENV_VAR, previous_socket_path);
+        restore_env(crate::session::SESSION_ENV_VAR, previous_session);
     }
 
     #[test]
     fn socket_path_uses_named_session_dir() {
         let _guard = env_lock().lock().unwrap();
         let config_home = unique_test_path("socket-named-config-home");
+        // Restore the previous values instead of dropping them. Clearing
+        // XDG_CONFIG_HOME outright would leak into later tests in the same
+        // process and point them at the developer's real config directory.
+        let previous_config_home = std::env::var_os("XDG_CONFIG_HOME");
+        let previous_socket_path = std::env::var_os(crate::api::SOCKET_PATH_ENV_VAR);
+        let previous_session = std::env::var_os(crate::session::SESSION_ENV_VAR);
         std::env::remove_var(crate::api::SOCKET_PATH_ENV_VAR);
         crate::session::clear_explicit_session_for_test();
         std::env::set_var(crate::session::SESSION_ENV_VAR, "work");
@@ -1361,8 +1387,9 @@ mod tests {
             .join("herdr.sock");
         assert_eq!(socket_path(), expected);
 
-        std::env::remove_var(crate::session::SESSION_ENV_VAR);
-        std::env::remove_var("XDG_CONFIG_HOME");
+        restore_env(crate::session::SESSION_ENV_VAR, previous_session);
+        restore_env(crate::api::SOCKET_PATH_ENV_VAR, previous_socket_path);
+        restore_env("XDG_CONFIG_HOME", previous_config_home);
     }
 
     #[test]

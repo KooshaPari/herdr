@@ -99,7 +99,13 @@ impl Agent {
         Self::Jcode,
     ];
 
-    pub const SCREEN_MANIFEST_AGENTS: [Self; 24] = [
+    /// Agents that ship a bundled screen-scraping manifest.
+    ///
+    /// Membership requires evidence-captured rules for that agent's own
+    /// bottom-buffer state. Agents identified only by process name or session
+    /// identity (for example `mastracode`, `kcode`, and `jcode`) stay out of
+    /// this list so detection never fabricates state from unverified patterns.
+    pub const SCREEN_MANIFEST_AGENTS: [Self; 22] = [
         Self::Pi,
         Self::Claude,
         Self::Codex,
@@ -122,8 +128,6 @@ impl Agent {
         Self::Letta,
         Self::Maki,
         Self::Muse,
-        Self::Kcode,
-        Self::Jcode,
     ];
 }
 
@@ -1104,6 +1108,8 @@ mod tests {
             (Agent::Letta, "letta"),
             (Agent::Maki, "maki"),
             (Agent::Muse, "muse"),
+            (Agent::Kcode, "kcode"),
+            (Agent::Jcode, "jcode"),
         ];
         assert_eq!(expected.len(), Agent::ALL.len());
         for (agent, executable) in expected {
