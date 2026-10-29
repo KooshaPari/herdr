@@ -865,8 +865,8 @@ fn attach_thin_client_with_config(
 ) -> (SpawnedHerdr, SpawnedHerdr, SharedOutput) {
     let spawned_server =
         spawn_server_with_config(config_home, runtime_dir, api_socket, client_socket, config);
-    wait_for_socket(api_socket, Duration::from_secs(10));
-    wait_for_socket(client_socket, Duration::from_secs(10));
+    wait_for_socket(api_socket, SERVER_SOCKET_WAIT);
+    wait_for_socket(client_socket, SERVER_SOCKET_WAIT);
 
     let thin_client = spawn_client_process(config_home, runtime_dir, api_socket);
     let reader = thin_client
@@ -1000,8 +1000,8 @@ fn federated_client_starts_without_local_and_survives_its_restart() {
     let remote_client = remote_runtime.join("herdr-client.sock");
     let mut remote_server =
         spawn_server(&remote_config, &remote_runtime, &remote_api, &remote_client);
-    wait_for_socket(&remote_api, Duration::from_secs(10));
-    wait_for_socket(&remote_client, Duration::from_secs(10));
+    wait_for_socket(&remote_api, SERVER_SOCKET_WAIT);
+    wait_for_socket(&remote_client, SERVER_SOCKET_WAIT);
     let created = send_json_request(
         &remote_api,
         &serde_json::json!({
