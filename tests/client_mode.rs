@@ -25,6 +25,12 @@ use support::{
     SERVER_MESSAGE_SERVER_SHUTDOWN, SERVER_SOCKET_WAIT,
 };
 
+/// How long a client render may take before the test gives up.
+///
+/// Rendering a federated client view on a loaded host can take longer than
+/// a few seconds; the wait must reflect the behavior, not the host load.
+const UI_RENDER_WAIT: Duration = Duration::from_secs(60);
+
 fn unique_test_dir() -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -961,7 +967,7 @@ fn federated_launch_opens_local_directly_while_saved_ssh_is_unavailable() {
             // the first rendered frame (the unavailable remote must not extend the wait). Retry
             // the write instead of assuming a single write lands, matching the recovered-Local
             // path below.
-            assert!(wait_until(Duration::from_secs(10), Duration::from_millis(20), || {
+            assert!(wait_until(UI_RENDER_WAIT, Duration::from_millis(20), || {
                 if read_output(&output).contains("LOCAL_DIRECT_READY") {
                     return true;
                 }
@@ -1230,7 +1236,7 @@ fn federated_client_starts_without_local_and_survives_its_restart() {
     let watermark = output_len(&output);
     support::stop_spawned_herdr(&mut *remote_server.child);
     assert!(
-        wait_until(Duration::from_secs(10), Duration::from_millis(20), || {
+        wait_until(UI_RENDER_WAIT, Duration::from_millis(20), || {
             read_output(&output)[watermark..].contains("reconnecting")
         }),
         "the selected remote must be marked disconnected"
@@ -1252,7 +1258,7 @@ fn federated_client_starts_without_local_and_survives_its_restart() {
         .write_all(&sidebar_row_click(&screen_text(), "local-returned"))
         .unwrap();
     assert!(
-        wait_until(Duration::from_secs(10), Duration::from_millis(20), || {
+        wait_until(UI_RENDER_WAIT, Duration::from_millis(20), || {
             screen_text().contains("LOCAL_RECOVERED_SURFACE")
         }),
         "recovered Local must be selectable: {}",
