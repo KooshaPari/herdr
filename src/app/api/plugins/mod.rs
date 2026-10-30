@@ -2032,6 +2032,12 @@ command = ["sh", "-c", "printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \"$PWD\" \
     #[cfg(unix)]
     #[tokio::test]
     async fn plugin_pane_open_injects_plugin_paths_and_protects_overrides() {
+        // The plugin path env vars and the assertions below both derive from
+        // `config_dir()`/`state_dir()`, which read `XDG_CONFIG_HOME` and
+        // `XDG_STATE_HOME` from the process environment. A test that rewrites
+        // those vars under `test_config_env_lock` would otherwise move the
+        // paths out from under this test mid-run.
+        let _guard = crate::config::test_config_env_lock().lock().unwrap();
         let mut app = test_app();
         app.state.workspaces = vec![crate::workspace::Workspace::test_new("plugin-path-env")];
         app.state.ensure_test_terminals();
@@ -2871,6 +2877,10 @@ command = ["sh", "-c", "printf '%s' \"$HERDR_PLUGIN_ACTION_ID\""]
     #[cfg(unix)]
     #[test]
     fn manifest_action_invoke_injects_plugin_paths() {
+        // The invoked action prints `config_dir()`/`state_dir()`-derived paths
+        // and the assertions below recompute them. Both must observe the same
+        // environment, so hold the env lock that guards `XDG_CONFIG_HOME`.
+        let _guard = crate::config::test_config_env_lock().lock().unwrap();
         let mut app = test_app();
         let root = unique_temp_path("plugin-action-path-env");
         write_manifest_content(

@@ -19,6 +19,41 @@ fn valid_agent_name(name: &str) -> bool {
         && chars.all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, '-' | '_'))
 }
 
+/// Config default args for `kind` (empty slice when unconfigured).
+fn configured_default_args(
+    configured: &std::collections::BTreeMap<String, crate::config::AgentArgsConfig>,
+    kind: crate::detect::Agent,
+) -> &[String] {
+    configured
+        .get(crate::detect::agent_label(kind))
+        .map(|config| config.args.as_slice())
+        .unwrap_or(&[])
+}
+
+/// Build the final argv (minus the executable) for an agent launch.
+///
+/// Config-default args come first, user-supplied args follow, so a later
+/// user flag overrides an earlier default flag for the same option. This
+/// deliberately preserves duplicates and ordering; CLIs apply "last wins".
+fn combined_agent_args(
+    configured: &std::collections::BTreeMap<String, crate::config::AgentArgsConfig>,
+    kind: crate::detect::Agent,
+    user_args: &[String],
+) -> Vec<String> {
+    configured_default_args(configured, kind)
+        .iter()
+        .cloned()
+        .chain(user_args.iter().cloned())
+        .collect()
+}
+
+impl App {
+    /// Config default args for `kind`, used by both fresh launches and restore.
+    pub(super) fn agent_default_args_for(&self, kind: crate::detect::Agent) -> &[String] {
+        configured_default_args(&self.agent_default_args, kind)
+    }
+}
+
 impl App {
     pub(super) fn collect_agent_infos(&self) -> Vec<crate::api::schema::AgentInfo> {
         self.state
@@ -160,8 +195,13 @@ impl App {
         {
             return Err(AgentStartError::InvalidArgument);
         }
+        // Deliberate: resume detection sees the combined (config-default + user)
+        // args, because config defaults are part of the effective launch command.
+        // A configured `resume <id>` must be tracked exactly like a user-supplied
+        // one; with empty defaults this is byte-identical to the prior behavior.
+        let launch_args = combined_agent_args(&self.agent_default_args, kind, &params.args);
         let persisted_agent_session =
-            crate::agent_resume::persisted_session_from_launch_args(kind, &params.args);
+            crate::agent_resume::persisted_session_from_launch_args(kind, &launch_args);
         let conflicts = self.agent_name_conflicts(&name, "");
         if !conflicts.is_empty() {
             return Err(AgentStartError::DuplicateName {
@@ -195,7 +235,7 @@ impl App {
             .ok_or_else(|| AgentStartError::TargetBusy(params.pane_id.clone()))?;
 
         let mut argv = vec![crate::detect::interactive_agent_executable(kind).to_string()];
-        argv.extend(params.args);
+        argv.extend(launch_args);
         let command = crate::platform::interactive_shell_command(&argv, &shell_name)
             .ok_or(AgentStartError::InvalidArgument)?;
         let bytes = crate::app::api_helpers::encode_api_submission(runtime, &command);
@@ -474,7 +514,24 @@ pub(super) enum AgentRenameError {
 
 #[cfg(test)]
 mod tests {
-    use super::valid_agent_name;
+    use super::{combined_agent_args, valid_agent_name};
+    use crate::config::AgentArgsConfig;
+    use crate::detect::Agent;
+    use std::collections::BTreeMap;
+
+    fn configured_args(entries: &[(&str, &[&str])]) -> BTreeMap<String, AgentArgsConfig> {
+        entries
+            .iter()
+            .map(|(kind, args)| {
+                (
+                    (*kind).to_string(),
+                    AgentArgsConfig {
+                        args: args.iter().map(|arg| (*arg).to_string()).collect(),
+                    },
+                )
+            })
+            .collect()
+    }
 
     #[test]
     fn agent_names_use_a_small_cli_safe_grammar() {
@@ -493,5 +550,34 @@ mod tests {
         ] {
             assert!(!valid_agent_name(name), "expected {name:?} to be invalid");
         }
+    }
+
+    #[test]
+    fn config_defaults_precede_user_args() {
+        let configured = configured_args(&[("jcode", &["--provider", "openai-compatible"])]);
+        let user = vec!["--model".to_string(), "MiniMax-M3".to_string()];
+        assert_eq!(
+            combined_agent_args(&configured, Agent::Jcode, &user),
+            vec!["--provider", "openai-compatible", "--model", "MiniMax-M3"]
+        );
+    }
+
+    #[test]
+    fn unconfigured_kind_behaves_like_today() {
+        let empty = BTreeMap::new();
+        let user = vec!["resume".to_string(), "session-abc".to_string()];
+        assert_eq!(combined_agent_args(&empty, Agent::Codex, &user), user);
+    }
+
+    #[test]
+    fn later_user_flag_wins_over_config_default() {
+        let configured = configured_args(&[("jcode", &["--model", "A"])]);
+        let user = vec!["--model".to_string(), "B".to_string()];
+        // Duplicates are preserved and the user's later value stays last, so a
+        // CLI's "last wins" behavior applies the user override.
+        assert_eq!(
+            combined_agent_args(&configured, Agent::Jcode, &user),
+            vec!["--model", "A", "--model", "B"]
+        );
     }
 }

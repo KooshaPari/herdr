@@ -254,6 +254,15 @@ pub(super) fn read_terminal_grid_size() -> std::io::Result<(u16, u16)> {
 }
 
 fn set_sigpipe_disposition(handler: libc::sighandler_t) {
+    // Unit tests share one process across every test in the binary. A CLI print
+    // helper that flips SIGPIPE to SIG_DFL and never restores it leaves the
+    // default disposition installed for later tests, so a test that writes to a
+    // closed socket kills the whole harness instead of failing. The real CLI
+    // keeps the default disposition so a closed stdout still exits via SIGPIPE
+    // (see tests/broken_pipe.rs, which runs the non-test binary).
+    if cfg!(test) {
+        return;
+    }
     let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
     action.sa_sigaction = handler;
     unsafe {
@@ -277,6 +286,56 @@ pub(crate) fn ignore_server_hangup() {
     unsafe {
         libc::sigemptyset(&mut action.sa_mask);
         libc::sigaction(libc::SIGHUP, &action, std::ptr::null_mut());
+    }
+}
+
+/// Keeps SIGTERM and SIGINT from killing the server with their default
+/// disposition while it is still starting up.
+///
+/// Server startup takes seconds (config load, session restore, plugin
+/// registry). The tokio signal monitor that routes these signals to the
+/// graceful shutdown path only starts once the event loop runs, so a signal
+/// arriving during startup would otherwise kill the process outright and skip
+/// the shutdown log and the final session save.
+///
+/// The handler records the signal instead of discarding it;
+/// [`take_early_termination_signal`] hands it to the shutdown path once the
+/// monitor is up, so the server still stops gracefully.
+pub(crate) fn defer_early_termination_signals() {
+    let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+    action.sa_sigaction =
+        record_early_termination_signal as extern "C" fn(libc::c_int) as libc::sighandler_t;
+    action.sa_flags = libc::SA_RESTART;
+    unsafe {
+        libc::sigemptyset(&mut action.sa_mask);
+        libc::sigaction(libc::SIGTERM, &action, std::ptr::null_mut());
+        libc::sigaction(libc::SIGINT, &action, std::ptr::null_mut());
+    }
+}
+
+/// The signal recorded while the server was still starting up, if any.
+static EARLY_TERMINATION_SIGNAL: std::sync::atomic::AtomicI32 =
+    std::sync::atomic::AtomicI32::new(0);
+
+extern "C" fn record_early_termination_signal(signal: libc::c_int) {
+    // Keep the first signal; a later one of the same kind is the same request.
+    EARLY_TERMINATION_SIGNAL
+        .compare_exchange(
+            0,
+            signal,
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+        )
+        .ok();
+}
+
+/// Returns the termination signal that arrived during startup, if any.
+pub(crate) fn take_early_termination_signal() -> Option<super::ServerQuitSignal> {
+    let recorded = EARLY_TERMINATION_SIGNAL.swap(0, std::sync::atomic::Ordering::AcqRel);
+    match recorded {
+        libc::SIGTERM => Some(super::ServerQuitSignal::Terminate),
+        libc::SIGINT => Some(super::ServerQuitSignal::Interrupt),
+        _ => None,
     }
 }
 
@@ -561,6 +620,34 @@ pub(crate) fn set_default_plugin_pane_pwd(env: &mut Vec<(String, String)>, cwd: 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cli_output_helpers_do_not_change_sigpipe_disposition_in_tests() {
+        // The test harness shares one process, so a CLI print helper that
+        // installs SIG_DFL would make a later test that writes to a closed
+        // socket kill the whole binary. The helpers must stay inert here.
+        let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+        action.sa_sigaction = libc::SIG_IGN;
+        let mut current: libc::sigaction = unsafe { std::mem::zeroed() };
+        unsafe {
+            libc::sigemptyset(&mut action.sa_mask);
+            libc::sigaction(libc::SIGPIPE, &action, std::ptr::null_mut());
+            libc::sigaction(libc::SIGPIPE, std::ptr::null(), &mut current);
+        }
+        let before = current.sa_sigaction;
+
+        begin_cli_output();
+        end_cli_output();
+
+        let mut after: libc::sigaction = unsafe { std::mem::zeroed() };
+        unsafe {
+            libc::sigaction(libc::SIGPIPE, std::ptr::null(), &mut after);
+        }
+        assert_eq!(
+            after.sa_sigaction, before,
+            "CLI output helpers must not change SIGPIPE inside the test harness"
+        );
+    }
 
     #[test]
     fn server_signal_monitor_survives_hangup_and_reports_terminate() {

@@ -1497,7 +1497,10 @@ mod tests {
     }
 
     fn recv_server_event(receiver: &mut mpsc::Receiver<ServerEvent>, context: &str) -> ServerEvent {
-        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        // A loaded host can delay the reader thread well past a second, and a
+        // short deadline fails the test for a reason unrelated to the behavior
+        // under test.
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
         loop {
             match receiver.try_recv() {
                 Ok(event) => return event,

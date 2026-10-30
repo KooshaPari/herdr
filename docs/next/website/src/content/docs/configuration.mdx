@@ -562,6 +562,17 @@ Automatic restores start one agent at a time, 100 milliseconds apart by default,
 
 Only panes with a valid native session reference from an official integration can resume; other panes restore as normal shells. See [Session state and restore](/docs/session-state/) for supported Agents and persistence behavior.
 
+## Agent default arguments
+
+Set default CLI arguments for an agent kind. Herdr prepends these to every fresh launch, and explicit `args` are appended after them, so a later flag wins:
+
+```toml
+[agents.jcode]
+args = ["--provider", "openai-compatible", "--model", "MiniMax-M3.1-Flash-Preview"]
+```
+
+Keys use the canonical agent kind (`jcode`, `codex`, `claude`, `cursor`, ...). Unknown kinds are ignored with a diagnostic. Defaults also apply when Herdr restores an agent session after a restart, so a resumed pane keeps the same provider and model. Arguments are passed through unchanged, so duplicate-flag behavior depends on the agent CLI; most treat the last value as authoritative.
+
 ## IME cursor tracking
 
 On macOS, AI Agent TUIs that hide the hardware cursor can prevent native input-method candidate windows from following the focused pane. Reveal a cursor anchor for those panes with:

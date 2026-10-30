@@ -1,4 +1,7 @@
-use std::{collections::BTreeSet, num::NonZeroUsize};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    num::NonZeroUsize,
+};
 
 use crossterm::event::KeyModifiers;
 use serde::{de, Deserialize, Deserializer, Serialize};
@@ -323,6 +326,32 @@ pub struct Config {
     pub advanced: AdvancedConfig,
     pub experimental: ExperimentalConfig,
     pub remote: RemoteConfig,
+    /// Per-agent-kind default CLI args, keyed by canonical agent kind
+    /// (see `crate::detect::agent_label`). Defaults are prepended to every
+    /// launch of that kind; user-supplied args follow and win on later flags.
+    pub agents: BTreeMap<String, AgentArgsConfig>,
+}
+
+/// Default CLI args for one agent kind.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(default)]
+pub struct AgentArgsConfig {
+    /// Args prepended to every launch of this agent kind. User-supplied args
+    /// are appended after these and win on later duplicate flags.
+    pub args: Vec<String>,
+}
+
+/// Report unknown agent-kind keys in `[agents]` without failing the load.
+///
+/// Unknown entries parse into the map but never match a launch (the lookup
+/// key is the canonical `agent_label`), so flagging them as diagnostics makes
+/// typos visible while keeping the rest of the config usable.
+pub(crate) fn agent_args_diagnostics(agents: &BTreeMap<String, AgentArgsConfig>) -> Vec<String> {
+    agents
+        .keys()
+        .filter(|key| crate::detect::parse_canonical_agent_label(key).is_none())
+        .map(|key| format!("unknown agent kind `{key}` in [agents]; ignoring its default args"))
+        .collect()
 }
 
 #[derive(Debug)]
@@ -1444,6 +1473,47 @@ startup_per_agent_delay_ms = 0
         let config: Config = toml::from_str(toml).unwrap();
         assert!(!config.session.resume_agents_on_restore);
         assert_eq!(config.session.startup_per_agent_delay_ms, 0);
+    }
+
+    #[test]
+    fn agent_default_args_default_empty_and_parse() {
+        assert!(Config::default().agents.is_empty());
+
+        let toml = r#"
+[agents.jcode]
+args = ["--provider", "openai-compatible", "--model", "MiniMax-M3.1-Flash-Preview"]
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(
+            config.agents.get("jcode").unwrap().args,
+            vec![
+                "--provider",
+                "openai-compatible",
+                "--model",
+                "MiniMax-M3.1-Flash-Preview"
+            ]
+        );
+    }
+
+    #[test]
+    fn agent_default_args_report_unknown_agent_kind_without_failing() {
+        let toml = r#"
+[agents.jcode]
+args = ["--model", "A"]
+
+[agents.not-an-agent]
+args = ["--model", "B"]
+"#;
+        // Unknown keys still parse so the rest of the config stays usable.
+        let config: Config = toml::from_str(toml).unwrap();
+        assert!(config.agents.contains_key("not-an-agent"));
+
+        let diagnostics = agent_args_diagnostics(&config.agents);
+        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics[0].contains("not-an-agent"));
+        assert!(!diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("jcode")));
     }
 
     #[test]

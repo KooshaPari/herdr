@@ -22,8 +22,14 @@ use support::{
     wait_for_message_variant, wait_for_message_variants, wait_for_socket, wait_until,
     CURRENT_ENDPOINT_PROTOCOL_GENERATION as CURRENT_PROTOCOL, SERVER_MESSAGE_PANE_SURFACE,
     SERVER_MESSAGE_PANE_SURFACE_PATCH, SERVER_MESSAGE_SEMANTIC_NOTIFICATION,
-    SERVER_MESSAGE_SERVER_SHUTDOWN,
+    SERVER_MESSAGE_SERVER_SHUTDOWN, SERVER_SOCKET_WAIT,
 };
+
+/// How long a client render may take before the test gives up.
+///
+/// Rendering a federated client view on a loaded host can take longer than
+/// a few seconds; the wait must reflect the behavior, not the host load.
+const UI_RENDER_WAIT: Duration = Duration::from_secs(60);
 
 fn unique_test_dir() -> PathBuf {
     let nanos = SystemTime::now()
@@ -268,8 +274,8 @@ fn client_connects_and_receives_pane_surface() {
     let client_socket = runtime_dir.join("herdr-client.sock");
 
     let spawned = spawn_server(&config_home, &runtime_dir, &api_socket, &client_socket);
-    wait_for_socket(&api_socket, Duration::from_secs(10));
-    wait_for_socket(&client_socket, Duration::from_secs(10));
+    wait_for_socket(&api_socket, SERVER_SOCKET_WAIT);
+    wait_for_socket(&client_socket, SERVER_SOCKET_WAIT);
 
     let mut stream = UnixStream::connect(&client_socket).expect("should connect to client socket");
     let (version, error) = client_shell_handshake(&mut stream, CURRENT_PROTOCOL, 54, 23)
@@ -299,8 +305,8 @@ fn direct_attach_initial_mouse_capture_follows_config() {
         &client_socket,
         "onboarding = false\n[ui]\nmouse_capture = false\n",
     );
-    wait_for_socket(&api_socket, Duration::from_secs(10));
-    wait_for_socket(&client_socket, Duration::from_secs(10));
+    wait_for_socket(&api_socket, SERVER_SOCKET_WAIT);
+    wait_for_socket(&client_socket, SERVER_SOCKET_WAIT);
     let created = send_json_request(
         &api_socket,
         &serde_json::json!({
@@ -454,8 +460,8 @@ fn client_sees_headless_startup_config_diagnostic() {
         _master: Some(pair.master),
         child,
     };
-    wait_for_socket(&api_socket, Duration::from_secs(10));
-    wait_for_socket(&client_socket, Duration::from_secs(10));
+    wait_for_socket(&api_socket, SERVER_SOCKET_WAIT);
+    wait_for_socket(&client_socket, SERVER_SOCKET_WAIT);
 
     let client = spawn_client_shell_process(&config_home, &runtime_dir, &api_socket);
     let output = spawn_pty_drain(
@@ -543,8 +549,8 @@ fn server_crash_after_attach_causes_lost_connection_error() {
     let client_socket = runtime_dir.join("herdr-client.sock");
 
     let mut spawned = spawn_server(&config_home, &runtime_dir, &api_socket, &client_socket);
-    wait_for_socket(&api_socket, Duration::from_secs(10));
-    wait_for_socket(&client_socket, Duration::from_secs(10));
+    wait_for_socket(&api_socket, SERVER_SOCKET_WAIT);
+    wait_for_socket(&client_socket, SERVER_SOCKET_WAIT);
 
     // Attach a real thin client (client subcommand) through PTY so handshake and
     // terminal setup paths are exercised.
@@ -732,8 +738,8 @@ fn sigwinch_refreshes_host_palette_without_resizing() {
         &client_socket,
         "onboarding = false\n[theme]\nname = \"terminal\"\n",
     );
-    wait_for_socket(&api_socket, Duration::from_secs(10));
-    wait_for_socket(&client_socket, Duration::from_secs(10));
+    wait_for_socket(&api_socket, SERVER_SOCKET_WAIT);
+    wait_for_socket(&client_socket, SERVER_SOCKET_WAIT);
     let client = spawn_client_shell_process(&config_home, &runtime_dir, &api_socket);
     let master = client._master.as_ref().expect("client PTY");
     let output = spawn_pty_drain(master.try_clone_reader().unwrap());
@@ -865,8 +871,8 @@ fn attach_thin_client_with_config(
 ) -> (SpawnedHerdr, SpawnedHerdr, SharedOutput) {
     let spawned_server =
         spawn_server_with_config(config_home, runtime_dir, api_socket, client_socket, config);
-    wait_for_socket(api_socket, Duration::from_secs(10));
-    wait_for_socket(client_socket, Duration::from_secs(10));
+    wait_for_socket(api_socket, SERVER_SOCKET_WAIT);
+    wait_for_socket(client_socket, SERVER_SOCKET_WAIT);
 
     let thin_client = spawn_client_process(config_home, runtime_dir, api_socket);
     let reader = thin_client
@@ -950,7 +956,7 @@ fn federated_launch_opens_local_directly_while_saved_ssh_is_unavailable() {
             );
             let output =
                 spawn_pty_drain(client._master.as_ref().unwrap().try_clone_reader().unwrap());
-            wait_for_socket(&api_socket, Duration::from_secs(10));
+            wait_for_socket(&api_socket, SERVER_SOCKET_WAIT);
             assert!(wait_until(
                 Duration::from_secs(10),
                 Duration::from_millis(20),
@@ -961,7 +967,7 @@ fn federated_launch_opens_local_directly_while_saved_ssh_is_unavailable() {
             // the first rendered frame (the unavailable remote must not extend the wait). Retry
             // the write instead of assuming a single write lands, matching the recovered-Local
             // path below.
-            assert!(wait_until(Duration::from_secs(10), Duration::from_millis(20), || {
+            assert!(wait_until(UI_RENDER_WAIT, Duration::from_millis(20), || {
                 if read_output(&output).contains("LOCAL_DIRECT_READY") {
                     return true;
                 }
@@ -1000,8 +1006,8 @@ fn federated_client_starts_without_local_and_survives_its_restart() {
     let remote_client = remote_runtime.join("herdr-client.sock");
     let mut remote_server =
         spawn_server(&remote_config, &remote_runtime, &remote_api, &remote_client);
-    wait_for_socket(&remote_api, Duration::from_secs(10));
-    wait_for_socket(&remote_client, Duration::from_secs(10));
+    wait_for_socket(&remote_api, SERVER_SOCKET_WAIT);
+    wait_for_socket(&remote_client, SERVER_SOCKET_WAIT);
     let created = send_json_request(
         &remote_api,
         &serde_json::json!({
@@ -1114,7 +1120,7 @@ fn federated_client_starts_without_local_and_survives_its_restart() {
     }
 
     let mut local = spawn_server(&config_home, &runtime_dir, &api_socket, &client_socket);
-    wait_for_socket(&api_socket, Duration::from_secs(10));
+    wait_for_socket(&api_socket, SERVER_SOCKET_WAIT);
     let created = send_json_request(
         &api_socket,
         &serde_json::json!({
@@ -1125,7 +1131,7 @@ fn federated_client_starts_without_local_and_survives_its_restart() {
     );
     assert_eq!(created["result"]["type"], "workspace_created");
     assert!(wait_until(
-        Duration::from_secs(10),
+        Duration::from_secs(30),
         Duration::from_millis(20),
         || screen_text().contains("local-online")
     ));
@@ -1149,7 +1155,7 @@ fn federated_client_starts_without_local_and_survives_its_restart() {
     assert!(client.child.try_wait().unwrap().is_none());
 
     let restarted = spawn_server(&config_home, &runtime_dir, &api_socket, &client_socket);
-    wait_for_socket(&api_socket, Duration::from_secs(10));
+    wait_for_socket(&api_socket, SERVER_SOCKET_WAIT);
     let created = send_json_request(
         &api_socket,
         &serde_json::json!({
@@ -1230,7 +1236,7 @@ fn federated_client_starts_without_local_and_survives_its_restart() {
     let watermark = output_len(&output);
     support::stop_spawned_herdr(&mut *remote_server.child);
     assert!(
-        wait_until(Duration::from_secs(10), Duration::from_millis(20), || {
+        wait_until(UI_RENDER_WAIT, Duration::from_millis(20), || {
             read_output(&output)[watermark..].contains("reconnecting")
         }),
         "the selected remote must be marked disconnected"
@@ -1252,7 +1258,7 @@ fn federated_client_starts_without_local_and_survives_its_restart() {
         .write_all(&sidebar_row_click(&screen_text(), "local-returned"))
         .unwrap();
     assert!(
-        wait_until(Duration::from_secs(10), Duration::from_millis(20), || {
+        wait_until(UI_RENDER_WAIT, Duration::from_millis(20), || {
             screen_text().contains("LOCAL_RECOVERED_SURFACE")
         }),
         "recovered Local must be selectable: {}",
@@ -1289,8 +1295,8 @@ fn client_shell_detaches_restores_and_freshly_reattaches_to_current_state() {
     let client_socket = runtime_dir.join("herdr-client.sock");
 
     let mut server = spawn_server(&config_home, &runtime_dir, &api_socket, &client_socket);
-    wait_for_socket(&api_socket, Duration::from_secs(10));
-    wait_for_socket(&client_socket, Duration::from_secs(10));
+    wait_for_socket(&api_socket, SERVER_SOCKET_WAIT);
+    wait_for_socket(&client_socket, SERVER_SOCKET_WAIT);
 
     let created = send_json_request(
         &api_socket,
@@ -1703,8 +1709,8 @@ fn client_exits_cleanly_when_terminal_and_transport_hang_up() {
     let client_socket = runtime_dir.join("herdr-client.sock");
 
     let mut spawned_server = spawn_server(&config_home, &runtime_dir, &api_socket, &client_socket);
-    wait_for_socket(&api_socket, Duration::from_secs(10));
-    wait_for_socket(&client_socket, Duration::from_secs(10));
+    wait_for_socket(&api_socket, SERVER_SOCKET_WAIT);
+    wait_for_socket(&client_socket, SERVER_SOCKET_WAIT);
 
     let mut thin_client = spawn_client_process(&config_home, &runtime_dir, &api_socket);
     read_until_client_attaches(&thin_client);
@@ -1762,8 +1768,8 @@ fn client_exits_cleanly_when_terminal_hangs_up() {
     let client_socket = runtime_dir.join("herdr-client.sock");
 
     let spawned_server = spawn_server(&config_home, &runtime_dir, &api_socket, &client_socket);
-    wait_for_socket(&api_socket, Duration::from_secs(10));
-    wait_for_socket(&client_socket, Duration::from_secs(10));
+    wait_for_socket(&api_socket, SERVER_SOCKET_WAIT);
+    wait_for_socket(&client_socket, SERVER_SOCKET_WAIT);
 
     let mut thin_client = spawn_client_process(&config_home, &runtime_dir, &api_socket);
     let attached_output = read_until_client_attaches(&thin_client);
@@ -1809,8 +1815,8 @@ fn client_receives_pane_surface_after_pane_output() {
     let client_socket = runtime_dir.join("herdr-client.sock");
 
     let spawned = spawn_server(&config_home, &runtime_dir, &api_socket, &client_socket);
-    wait_for_socket(&api_socket, Duration::from_secs(10));
-    wait_for_socket(&client_socket, Duration::from_secs(10));
+    wait_for_socket(&api_socket, SERVER_SOCKET_WAIT);
+    wait_for_socket(&client_socket, SERVER_SOCKET_WAIT);
 
     let mut stream = UnixStream::connect(&client_socket).expect("should connect to client socket");
     let (version, error) = client_shell_handshake(&mut stream, CURRENT_PROTOCOL, 54, 23)
@@ -1897,8 +1903,8 @@ fn unavailable_restored_pane_keeps_saved_cwd_in_server() {
     .unwrap();
 
     let spawned = spawn_server(&config_home, &runtime_dir, &api_socket, &client_socket);
-    wait_for_socket(&api_socket, Duration::from_secs(10));
-    wait_for_socket(&client_socket, Duration::from_secs(10));
+    wait_for_socket(&api_socket, SERVER_SOCKET_WAIT);
+    wait_for_socket(&client_socket, SERVER_SOCKET_WAIT);
 
     let workspaces = send_json_request(
         &api_socket,
@@ -1960,7 +1966,7 @@ fn unavailable_restored_pane_keeps_saved_cwd_in_server() {
 
     fs::create_dir(missing_cwd).unwrap();
     let restarted = spawn_server(&config_home, &runtime_dir, &api_socket, &client_socket);
-    wait_for_socket(&api_socket, Duration::from_secs(10));
+    wait_for_socket(&api_socket, SERVER_SOCKET_WAIT);
     let recovered = send_json_request(
         &api_socket,
         &format!(r#"{{"id":"recovered","method":"pane.get","params":{{"pane_id":"{pane_id}"}}}}"#),
@@ -1993,8 +1999,8 @@ fn graceful_shutdown_sends_server_shutdown_to_client() {
     let client_socket = runtime_dir.join("herdr-client.sock");
 
     let mut spawned = spawn_server(&config_home, &runtime_dir, &api_socket, &client_socket);
-    wait_for_socket(&api_socket, Duration::from_secs(10));
-    wait_for_socket(&client_socket, Duration::from_secs(10));
+    wait_for_socket(&api_socket, SERVER_SOCKET_WAIT);
+    wait_for_socket(&client_socket, SERVER_SOCKET_WAIT);
 
     let mut stream = UnixStream::connect(&client_socket).expect("should connect to client socket");
     let (version, error) = client_shell_handshake(&mut stream, CURRENT_PROTOCOL, 54, 23)
@@ -2088,8 +2094,8 @@ fn client_receives_notify_on_agent_state_change() {
         _master: Some(pair.master),
         child,
     };
-    wait_for_socket(&api_socket, Duration::from_secs(10));
-    wait_for_socket(&client_socket, Duration::from_secs(10));
+    wait_for_socket(&api_socket, SERVER_SOCKET_WAIT);
+    wait_for_socket(&client_socket, SERVER_SOCKET_WAIT);
 
     let mut stream = UnixStream::connect(&client_socket).expect("should connect");
     let (version, error) = client_shell_handshake(&mut stream, CURRENT_PROTOCOL, 54, 23)

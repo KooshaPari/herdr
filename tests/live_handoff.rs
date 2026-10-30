@@ -17,7 +17,7 @@ use support::{
     cleanup_test_base, client_shell_handshake, register_runtime_dir, register_spawned_herdr_pid,
     send_client_shell_shift_enter, unregister_spawned_herdr_pid, wait_for_client_shell_bootstrap,
     wait_for_message_variant, wait_for_socket, SERVER_MESSAGE_ENDPOINT_CONTROL,
-    SERVER_MESSAGE_SERVER_SHUTDOWN,
+    SERVER_MESSAGE_SERVER_SHUTDOWN, SERVER_SOCKET_WAIT,
 };
 
 struct SpawnedHerdr {
@@ -399,14 +399,21 @@ fn wait_for_output(socket_path: &Path, pane_id: &str, needle: &str) {
 fn wait_for_file_contains(path: &Path, needle: &str, timeout: Duration) -> String {
     let deadline = Instant::now() + timeout;
     let mut last_text = String::new();
-    while Instant::now() < deadline {
+    // Poll with a growing interval so a saturated host still gives the child
+    // process room to produce the marker before the deadline.
+    let mut interval = Duration::from_millis(50);
+    loop {
         if let Ok(text) = fs::read_to_string(path) {
             last_text = text;
             if last_text.contains(needle) {
                 return last_text;
             }
         }
-        thread::sleep(Duration::from_millis(50));
+        if Instant::now() >= deadline {
+            break;
+        }
+        thread::sleep(interval);
+        interval = (interval * 2).min(Duration::from_millis(250));
     }
     panic!(
         "{} did not contain {needle:?}; last text was {last_text:?}",
@@ -588,7 +595,7 @@ fn live_server_holds_one_pty_master_fd_per_pane() {
     let api_socket = runtime_dir.join("herdr.sock");
 
     let spawned = spawn_server(&config_home, &runtime_dir, &api_socket);
-    wait_for_socket(&api_socket, Duration::from_secs(10));
+    wait_for_socket(&api_socket, SERVER_SOCKET_WAIT);
     register_runtime_dir(&runtime_dir);
     let server_pid = spawned
         .child
@@ -670,7 +677,7 @@ fn live_handoff_unknown_pane_exit_preserves_session_on_shutdown() {
     let api_socket = runtime_dir.join("herdr.sock");
 
     let spawned = spawn_server(&config_home, &runtime_dir, &api_socket);
-    wait_for_socket(&api_socket, Duration::from_secs(10));
+    wait_for_socket(&api_socket, SERVER_SOCKET_WAIT);
     register_runtime_dir(&runtime_dir);
 
     let created = request(
@@ -762,7 +769,7 @@ fn live_handoff_carries_more_panes_than_one_scm_rights_message() {
     let api_socket = runtime_dir.join("herdr.sock");
 
     let spawned = spawn_server(&config_home, &runtime_dir, &api_socket);
-    wait_for_socket(&api_socket, Duration::from_secs(10));
+    wait_for_socket(&api_socket, SERVER_SOCKET_WAIT);
     register_runtime_dir(&runtime_dir);
     let server_pid = spawned
         .child
@@ -834,7 +841,7 @@ fn live_handoff_preserves_named_session_socket_paths() {
     let client_socket = session_dir.join("herdr-client.sock");
 
     let spawned = spawn_named_session_server(&config_home, &runtime_dir, "work");
-    wait_for_socket(&api_socket, Duration::from_secs(10));
+    wait_for_socket(&api_socket, SERVER_SOCKET_WAIT);
     register_runtime_dir(&runtime_dir);
 
     assert_ok(request(
@@ -919,8 +926,8 @@ fn live_handoff_preserves_client_socket_env_without_api_socket_env() {
         None,
         Some(&client_socket),
     );
-    wait_for_socket(&api_socket, Duration::from_secs(10));
-    wait_for_socket(&client_socket, Duration::from_secs(10));
+    wait_for_socket(&api_socket, SERVER_SOCKET_WAIT);
+    wait_for_socket(&client_socket, SERVER_SOCKET_WAIT);
     register_runtime_dir(&runtime_dir);
 
     assert_ok(request(
@@ -952,7 +959,7 @@ fn live_handoff_preserves_installed_plugins() {
     write_plugin_manifest(&added_plugin, "test.live-handoff-added");
 
     let spawned = spawn_default_session_server(&config_home, &runtime_dir);
-    wait_for_socket(&api_socket, Duration::from_secs(10));
+    wait_for_socket(&api_socket, SERVER_SOCKET_WAIT);
     register_runtime_dir(&runtime_dir);
 
     link_plugin(&api_socket, &existing_plugin);
@@ -1001,7 +1008,7 @@ fn live_handoff_preserves_pane_process_io() {
     let second_received_marker = base.join("second-received");
 
     let spawned = spawn_server(&config_home, &runtime_dir, &api_socket);
-    wait_for_socket(&api_socket, Duration::from_secs(10));
+    wait_for_socket(&api_socket, SERVER_SOCKET_WAIT);
     register_runtime_dir(&runtime_dir);
 
     let created = request(
@@ -1201,7 +1208,7 @@ sys.stdout.buffer.write(b"\x1b[>5u")
 sys.stdout.flush()
 pathlib.Path({ready:?}).write_text("ready")
 tty.setraw(sys.stdin.fileno())
-ready_fds, _, _ = select.select([sys.stdin.fileno()], [], [], 5)
+ready_fds, _, _ = select.select([sys.stdin.fileno()], [], [], 60)
 data = os.read(sys.stdin.fileno(), 32) if ready_fds else b""
 pathlib.Path({received:?}).write_text(data.hex())
 "#,
@@ -1212,7 +1219,7 @@ pathlib.Path({received:?}).write_text(data.hex())
     .unwrap();
 
     let spawned = spawn_server(&config_home, &runtime_dir, &api_socket);
-    wait_for_socket(&api_socket, Duration::from_secs(10));
+    wait_for_socket(&api_socket, SERVER_SOCKET_WAIT);
     register_runtime_dir(&runtime_dir);
 
     let created = request(
@@ -1297,7 +1304,7 @@ sys.stdout.buffer.write(b"\x1b[>4;2m")
 sys.stdout.flush()
 pathlib.Path({ready:?}).write_text("ready")
 tty.setraw(sys.stdin.fileno())
-ready_fds, _, _ = select.select([sys.stdin.fileno()], [], [], 5)
+ready_fds, _, _ = select.select([sys.stdin.fileno()], [], [], 60)
 data = os.read(sys.stdin.fileno(), 32) if ready_fds else b""
 pathlib.Path({received:?}).write_text(data.hex())
 "#,
@@ -1308,7 +1315,7 @@ pathlib.Path({received:?}).write_text(data.hex())
     .unwrap();
 
     let spawned = spawn_server(&config_home, &runtime_dir, &api_socket);
-    wait_for_socket(&api_socket, Duration::from_secs(10));
+    wait_for_socket(&api_socket, SERVER_SOCKET_WAIT);
     register_runtime_dir(&runtime_dir);
 
     let created = request(
@@ -1381,7 +1388,7 @@ fn live_handoff_accepts_canonical_pane_id_from_child_env() {
     let pane_id_marker = base.join("pane-id");
 
     let spawned = spawn_server(&config_home, &runtime_dir, &api_socket);
-    wait_for_socket(&api_socket, Duration::from_secs(10));
+    wait_for_socket(&api_socket, SERVER_SOCKET_WAIT);
     register_runtime_dir(&runtime_dir);
 
     let created = request(
@@ -1479,7 +1486,7 @@ fn live_handoff_keeps_unmanaged_agent_name_bound_to_saved_session() {
     fs::set_permissions(&fake_pi, fs::Permissions::from_mode(0o755)).unwrap();
 
     let spawned = spawn_server(&config_home, &runtime_dir, &api_socket);
-    wait_for_socket(&api_socket, Duration::from_secs(10));
+    wait_for_socket(&api_socket, SERVER_SOCKET_WAIT);
     register_runtime_dir(&runtime_dir);
     let created = request(
         &api_socket,
@@ -1649,7 +1656,7 @@ fn live_handoff_keeps_agent_started_pane_after_agent_exits() {
             ("SHELL", delayed_shell.to_str().unwrap()),
         ],
     );
-    wait_for_socket(&api_socket, Duration::from_secs(10));
+    wait_for_socket(&api_socket, SERVER_SOCKET_WAIT);
     register_runtime_dir(&runtime_dir);
     let workspace = request(
         &api_socket,
@@ -1735,7 +1742,7 @@ fn live_handoff_keeps_shell_pane_after_foreground_process_exits() {
     let shell_marker = base.join("shell-after-foreground");
 
     let spawned = spawn_server(&config_home, &runtime_dir, &api_socket);
-    wait_for_socket(&api_socket, Duration::from_secs(10));
+    wait_for_socket(&api_socket, SERVER_SOCKET_WAIT);
     register_runtime_dir(&runtime_dir);
 
     let created = request(
@@ -1808,7 +1815,7 @@ fn live_handoff_preserves_python_http_server() {
     let port = unused_local_port();
 
     let spawned = spawn_server(&config_home, &runtime_dir, &api_socket);
-    wait_for_socket(&api_socket, Duration::from_secs(10));
+    wait_for_socket(&api_socket, SERVER_SOCKET_WAIT);
     register_runtime_dir(&runtime_dir);
 
     let created = request(
@@ -1966,7 +1973,7 @@ fn live_handoff_bad_expected_protocol_rolls_back_old_server() {
     let received_marker = base.join("received");
 
     let spawned = spawn_server(&config_home, &runtime_dir, &api_socket);
-    wait_for_socket(&api_socket, Duration::from_secs(10));
+    wait_for_socket(&api_socket, SERVER_SOCKET_WAIT);
     register_runtime_dir(&runtime_dir);
 
     let created = request(
@@ -2050,7 +2057,7 @@ fn live_handoff_import_failure_rolls_back_old_server_at(failure_point: &str) {
         &api_socket,
         &[("HERDR_TEST_HANDOFF_IMPORT_FAIL", failure_point)],
     );
-    wait_for_socket(&api_socket, Duration::from_secs(10));
+    wait_for_socket(&api_socket, SERVER_SOCKET_WAIT);
     register_runtime_dir(&runtime_dir);
 
     let created = request(

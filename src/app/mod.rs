@@ -138,6 +138,8 @@ pub struct App {
     pub(crate) update_version_check_enabled: bool,
     pub(crate) update_manifest_check_enabled: bool,
     pub(crate) loaded_host_cursor: crate::config::HostCursorModeConfig,
+    pub(crate) agent_default_args:
+        std::collections::BTreeMap<String, crate::config::AgentArgsConfig>,
     pub(crate) agent_metadata_deadline: Option<Instant>,
     pub(crate) pending_agent_resume_deadline: Option<Instant>,
     startup_per_agent_delay: Duration,
@@ -649,6 +651,7 @@ impl App {
             update_version_check_enabled: config.update.version_check,
             update_manifest_check_enabled: config.update.manifest_check,
             loaded_host_cursor: config.ui.host_cursor,
+            agent_default_args: config.agents.clone(),
             agent_metadata_deadline: None,
             pending_agent_resume_deadline: None,
             startup_per_agent_delay: Duration::from_millis(
@@ -1009,6 +1012,10 @@ impl App {
                 crate::worktree::expand_tilde_absolute_path(&config.worktrees.directory);
         }
 
+        if !invalid_section("agents") {
+            self.agent_default_args = config.agents.clone();
+        }
+
         if !invalid_section("theme") {
             self.state.theme_runtime = theme_runtime_config(config, !invalid_section("ui"));
             self.refresh_effective_app_theme();
@@ -1104,6 +1111,14 @@ mod tests {
             std::env::set_var("XDG_STATE_HOME", value);
         } else {
             std::env::remove_var("XDG_STATE_HOME");
+        }
+    }
+
+    fn restore_xdg_config_home(original: Option<std::ffi::OsString>) {
+        if let Some(value) = original {
+            std::env::set_var("XDG_CONFIG_HOME", value);
+        } else {
+            std::env::remove_var("XDG_CONFIG_HOME");
         }
     }
 
@@ -1853,6 +1868,21 @@ mod tests {
         let report = app.apply_live_config(&config, &[], &["session".into()], false);
         assert!(report.diagnostics.is_empty());
         assert_eq!(app.startup_per_agent_delay, Duration::from_millis(100));
+    }
+
+    #[test]
+    fn live_reload_updates_agent_default_args() {
+        let mut app = test_app();
+        let config: Config =
+            toml::from_str("[agents.codex]\nargs = [\"--model\", \"A\"]\n").unwrap();
+
+        let report = app.apply_live_config(&config, &[], &[], false);
+
+        assert_eq!(report.status, crate::config::ConfigReloadStatus::Applied);
+        assert_eq!(
+            app.agent_default_args_for(Agent::Codex),
+            ["--model".to_string(), "A".to_string()]
+        );
     }
 
     #[test]
@@ -2981,6 +3011,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn agent_start_prepends_configured_default_args_before_user_args() {
+        let mut app = test_app();
+        let workspace = Workspace::test_new("agent-default-args");
+        let root = workspace.tabs[0].root_pane;
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        let pane_id = app.pane_info(0, root).unwrap().pane_id;
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&root]
+            .attached_terminal_id
+            .clone();
+        let (runtime, _receiver) =
+            crate::terminal::TerminalRuntime::test_with_channel_capacity(80, 24, 1);
+        app.terminal_runtimes.insert(terminal_id.clone(), runtime);
+        app.agent_default_args.insert(
+            "codex".into(),
+            crate::config::AgentArgsConfig {
+                args: vec!["--model".into(), "A".into()],
+            },
+        );
+
+        let response = app.handle_api_request(crate::api::schema::Request {
+            id: "req_agent_default_args".into(),
+            method: crate::api::schema::Method::AgentStart(crate::api::schema::AgentStartParams {
+                name: "worker".into(),
+                kind: "codex".into(),
+                pane_id,
+                args: vec!["--model".into(), "B".into()],
+                timeout_ms: Some(4_000),
+            }),
+        });
+        let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+
+        assert_eq!(response["result"]["type"], "agent_started");
+        assert_eq!(
+            response["result"]["argv"],
+            serde_json::json!(["codex", "--model", "A", "--model", "B"])
+        );
+    }
+
+    #[tokio::test]
     async fn failed_agent_start_input_rolls_back_and_can_retry() {
         let mut app = test_app();
         let workspace = Workspace::test_new("agent-start-input-failure");
@@ -3201,6 +3273,7 @@ mod tests {
     fn due_session_save_starts_background_writer() {
         let _guard = crate::config::test_config_env_lock().lock().unwrap();
         let config_home = unique_temp_path("background-session-save");
+        let previous_config_home = std::env::var_os("XDG_CONFIG_HOME");
         std::env::set_var("XDG_CONFIG_HOME", &config_home);
         std::env::remove_var(crate::session::SESSION_ENV_VAR);
 
@@ -3217,7 +3290,7 @@ mod tests {
         app.save_session_now();
         assert!(crate::session::data_dir().join("session.json").exists());
 
-        std::env::remove_var("XDG_CONFIG_HOME");
+        restore_xdg_config_home(previous_config_home);
         let _ = std::fs::remove_dir_all(config_home);
     }
 
@@ -3266,6 +3339,7 @@ mod tests {
     async fn pane_exit_checkpoint_survives_automatic_workspace_creation_on_shutdown() {
         let _guard = crate::config::test_config_env_lock().lock().unwrap();
         let config_home = unique_temp_path("signaled-pane-session-checkpoint");
+        let previous_config_home = std::env::var_os("XDG_CONFIG_HOME");
         std::env::set_var("XDG_CONFIG_HOME", &config_home);
         std::env::remove_var(crate::session::SESSION_ENV_VAR);
 
@@ -3295,7 +3369,7 @@ mod tests {
         assert_eq!(snapshot.workspaces.len(), 1);
         assert_eq!(snapshot.workspaces[0].tabs[0].panes.len(), 2);
 
-        std::env::remove_var("XDG_CONFIG_HOME");
+        restore_xdg_config_home(previous_config_home);
         let _ = std::fs::remove_dir_all(config_home);
     }
 
@@ -3303,6 +3377,7 @@ mod tests {
     fn normal_autosave_replaces_a_signaled_exit_checkpoint() {
         let _guard = crate::config::test_config_env_lock().lock().unwrap();
         let config_home = unique_temp_path("signaled-pane-autosave");
+        let previous_config_home = std::env::var_os("XDG_CONFIG_HOME");
         std::env::set_var("XDG_CONFIG_HOME", &config_home);
         std::env::remove_var(crate::session::SESSION_ENV_VAR);
 
@@ -3328,7 +3403,7 @@ mod tests {
 
         assert!(crate::persist::load().is_none());
 
-        std::env::remove_var("XDG_CONFIG_HOME");
+        restore_xdg_config_home(previous_config_home);
         let _ = std::fs::remove_dir_all(config_home);
     }
 
@@ -3336,6 +3411,7 @@ mod tests {
     fn durable_mutation_after_pane_exit_checkpoint_wins_on_shutdown() {
         let _guard = crate::config::test_config_env_lock().lock().unwrap();
         let config_home = unique_temp_path("pane-exit-newer-session-state");
+        let previous_config_home = std::env::var_os("XDG_CONFIG_HOME");
         std::env::set_var("XDG_CONFIG_HOME", &config_home);
         std::env::remove_var(crate::session::SESSION_ENV_VAR);
 
@@ -3369,7 +3445,7 @@ mod tests {
             assert_eq!(snapshot.workspaces[0].custom_name.as_deref(), Some("newer"));
         }
 
-        std::env::remove_var("XDG_CONFIG_HOME");
+        restore_xdg_config_home(previous_config_home);
         let _ = std::fs::remove_dir_all(config_home);
     }
 

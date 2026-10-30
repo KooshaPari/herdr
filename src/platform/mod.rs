@@ -386,8 +386,9 @@ mod unix_common;
 pub(crate) mod unix_image_files;
 #[cfg(unix)]
 pub(crate) use unix_common::{
-    begin_cli_output, end_cli_output, forward_remote_bridge_stdio, ignore_server_hangup,
-    local_stream_peer_description, spawn_server_signal_monitor, RemoteBridgeWake,
+    begin_cli_output, defer_early_termination_signals, end_cli_output, forward_remote_bridge_stdio,
+    ignore_server_hangup, local_stream_peer_description, spawn_server_signal_monitor,
+    take_early_termination_signal, RemoteBridgeWake,
 };
 
 mod client_state;
@@ -398,6 +399,14 @@ pub(crate) fn begin_cli_output() {}
 
 #[cfg(not(unix))]
 pub(crate) fn end_cli_output() {}
+
+#[cfg(not(unix))]
+pub(crate) fn defer_early_termination_signals() {}
+
+#[cfg(not(unix))]
+pub(crate) fn take_early_termination_signal() -> Option<ServerQuitSignal> {
+    None
+}
 
 #[cfg(target_os = "linux")]
 mod linux;
