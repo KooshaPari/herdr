@@ -20,7 +20,10 @@ fn valid_agent_name(name: &str) -> bool {
 }
 
 /// Config default args for `kind` (empty slice when unconfigured).
-fn configured_default_args(
+///
+/// `pub(crate)` so the resume-path test in `crate::app::agent_resume` exercises
+/// this exact lookup rather than a copy of its body, which could drift.
+pub(crate) fn configured_default_args(
     configured: &std::collections::BTreeMap<String, crate::config::AgentArgsConfig>,
     kind: crate::detect::Agent,
 ) -> &[String] {

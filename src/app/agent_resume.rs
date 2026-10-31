@@ -424,6 +424,59 @@ mod tests {
         assert_eq!(resume_argv_with_defaults(&reported, &[]), reported);
     }
 
+    /// Mirrors the composition in `start_pending_agent_resume`: config default
+    /// args for the agent kind derived from the saved label must reach the
+    /// resume argv, exactly as they do for a fresh launch.
+    ///
+    /// Calls the production lookup (`crate::app::agents::configured_default_args`)
+    /// rather than a copy of its body, so a change to the lookup shape fails here.
+    #[test]
+    fn resume_argv_applies_config_defaults_for_agent_kind() {
+        use std::collections::BTreeMap;
+
+        let mut configured: BTreeMap<String, crate::config::AgentArgsConfig> = BTreeMap::new();
+        configured.insert(
+            "jcode".to_string(),
+            crate::config::AgentArgsConfig {
+                args: vec!["--model".to_string(), "MiniMax-M3".to_string()],
+            },
+        );
+
+        // Same lookup the production resume path uses.
+        let lookup = |kind: crate::detect::Agent| -> &[String] {
+            crate::app::agents::configured_default_args(&configured, kind)
+        };
+
+        // 1. Configured kind: defaults land between executable and saved args.
+        let plan_argv = vec![
+            "jcode".to_string(),
+            "resume".to_string(),
+            "session-abc".to_string(),
+        ];
+        let defaults = crate::detect::parse_agent_label("jcode")
+            .map(|kind| lookup(kind))
+            .unwrap_or(&[]);
+        assert_eq!(
+            resume_argv_with_defaults(&plan_argv, defaults),
+            vec!["jcode", "--model", "MiniMax-M3", "resume", "session-abc"]
+        );
+
+        // 2. Unconfigured kind: saved argv is returned unchanged.
+        let codex_argv = vec![
+            "codex".to_string(),
+            "resume".to_string(),
+            "session-abc".to_string(),
+        ];
+        let codex_defaults = crate::detect::parse_agent_label("codex")
+            .map(|kind| lookup(kind))
+            .unwrap_or(&[]);
+        assert!(codex_defaults.is_empty());
+        assert_eq!(
+            resume_argv_with_defaults(&codex_argv, codex_defaults),
+            codex_argv
+        );
+    }
+
     #[cfg(unix)]
     fn test_app() -> App {
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
