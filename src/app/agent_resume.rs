@@ -454,7 +454,7 @@ mod tests {
             "session-abc".to_string(),
         ];
         let defaults = crate::detect::parse_agent_label("jcode")
-            .map(|kind| lookup(kind))
+            .map(&lookup)
             .unwrap_or(&[]);
         assert_eq!(
             resume_argv_with_defaults(&plan_argv, defaults),
@@ -468,7 +468,7 @@ mod tests {
             "session-abc".to_string(),
         ];
         let codex_defaults = crate::detect::parse_agent_label("codex")
-            .map(|kind| lookup(kind))
+            .map(&lookup)
             .unwrap_or(&[]);
         assert!(codex_defaults.is_empty());
         assert_eq!(
