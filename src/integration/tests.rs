@@ -1349,6 +1349,28 @@ fn install_codex_writes_hook_and_updates_hooks_and_config() {
 }
 
 #[test]
+fn install_codex_preserves_existing_files_when_hooks_are_invalid() {
+    let base = unique_base();
+    fs::create_dir_all(&base).unwrap();
+    let hook = base.join(CODEX_HOOK_INSTALL_NAME);
+    let hooks = base.join("hooks.json");
+    let config = base.join("config.toml");
+    fs::write(&hook, "existing hook").unwrap();
+    fs::write(&config, "model = \"original\"\n").unwrap();
+    for invalid in ["{", "{\"hooks\": []}"] {
+        fs::write(&hooks, invalid).unwrap();
+        assert!(install_codex_at(base.clone()).is_err());
+        assert_eq!(fs::read_to_string(&hook).unwrap(), "existing hook");
+        assert_eq!(fs::read_to_string(&hooks).unwrap(), invalid);
+        assert_eq!(
+            fs::read_to_string(&config).unwrap(),
+            "model = \"original\"\n"
+        );
+    }
+    let _ = fs::remove_dir_all(base);
+}
+
+#[test]
 fn install_codex_uses_codex_home_env() {
     let _lock = integration_env_lock();
     let base = unique_base();
