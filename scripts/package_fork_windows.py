@@ -6,6 +6,8 @@ import argparse
 import hashlib
 import json
 import os
+import re
+import tempfile
 import stat
 import subprocess
 import zipfile
@@ -24,14 +26,26 @@ def info(name):
     return entry
 
 
-def package(binary, output, version, upstream_commit):
+def candidate_directory(commit):
+    if not re.fullmatch(r"[0-9a-f]{40}", commit):
+        raise ValueError("candidate commit must be a full lowercase SHA-1")
+    base = Path(tempfile.gettempdir()) / "herdr-fork-packaging"
+    candidate = base / commit
+    for directory in (base, candidate):
+        metadata = directory.lstat()
+        if not stat.S_ISDIR(metadata.st_mode) or getattr(metadata, "st_file_attributes", 0) & 0x400:
+            raise ValueError("candidate directory must not be a symlink or reparse point")
+    return candidate
+
+
+def package(version, upstream_commit):
     receipt = preflight(version, upstream_commit)
-    binary = Path(binary)
-    output = Path(output)
-    if binary.is_symlink() or not binary.is_file():
+    directory = candidate_directory(receipt["candidate_commit"])
+    binary = directory / "herdr.exe"
+    output = directory / "candidate.zip"
+    binary_metadata = binary.lstat()
+    if not stat.S_ISREG(binary_metadata.st_mode) or getattr(binary_metadata, "st_file_attributes", 0) & 0x400:
         raise ValueError("binary must be a regular non-symlink file")
-    if output.suffix.lower() != ".zip":
-        raise ValueError("output must have a .zip extension")
     if output.exists() or output.is_symlink():
         raise ValueError("output already exists")
     with binary.open("rb") as source:
@@ -58,12 +72,10 @@ def package(binary, output, version, upstream_commit):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--binary", required=True)
-    parser.add_argument("--output", required=True)
     parser.add_argument("--version", required=True)
     parser.add_argument("--upstream-commit", required=True)
     args = parser.parse_args()
-    print(json.dumps(package(args.binary, args.output, args.version, args.upstream_commit), sort_keys=True))
+    print(json.dumps(package(args.version, args.upstream_commit), sort_keys=True))
 
 
 if __name__ == "__main__":

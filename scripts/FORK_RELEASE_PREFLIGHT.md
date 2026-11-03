@@ -20,11 +20,16 @@ still needs a separately designed artifact and publication pipeline.
 
 ## Unpublished Windows candidate archive
 
-After the source checkout is committed and clean, package a local Windows
-executable to a new path outside the checkout:
+After committing a clean checkout, create a directory beneath the current
+user's temporary directory at `herdr-fork-packaging/<full-commit-sha>` and put
+the candidate at `herdr.exe` there. Protect the directory from concurrent
+modification by other processes. The packager takes no file paths from its CLI;
+it derives the fixed input and `candidate.zip` output names from the verified
+commit. Existing directories and binary must not be symlinks or Windows reparse
+points, and output is created exclusively.
 
 ```text
-python scripts/package_fork_windows.py --binary PATH_TO_EXE --output NEW_CANDIDATE.zip --version 0.9.3-k0.1.0 --upstream-commit 7b116c05bfda646af39d2524c54e70c751f57ee8
+python scripts/package_fork_windows.py --version 0.9.3-k0.1.0 --upstream-commit 7b116c05bfda646af39d2524c54e70c751f57ee8
 ```
 
 The archive contains the supplied bytes as `herdr.exe` and a JSON receipt with
@@ -33,4 +38,5 @@ that the executable was built from that commit, that it has the stated version,
 or that it is suitable for release. A two-byte Windows header check is not a
 platform validation. Existing output is never replaced; a partial output may
 remain if writing fails and must be inspected before retry. No installation,
-release creation, signing, or upload is performed.
+release creation, signing, or upload is performed. The directory checks do not
+prevent a concurrently privileged process from replacing paths during the run.
