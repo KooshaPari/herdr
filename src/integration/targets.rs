@@ -158,7 +158,10 @@ pub(crate) fn install_claude() -> io::Result<ClaudeInstallPaths> {
 }
 
 pub(crate) fn install_codex() -> io::Result<CodexInstallPaths> {
-    let dir = codex_dir()?;
+    install_codex_at(codex_dir()?)
+}
+
+pub(crate) fn install_codex_at(dir: PathBuf) -> io::Result<CodexInstallPaths> {
     check_config_targets(&dir, &["hooks.json", "config.toml"])?;
     if !dir.is_dir() {
         return Err(io::Error::other(format!(
@@ -168,9 +171,6 @@ pub(crate) fn install_codex() -> io::Result<CodexInstallPaths> {
     }
 
     let hook_path = dir.join(CODEX_HOOK_INSTALL_NAME);
-    fs::write(&hook_path, CODEX_HOOK_ASSET)?;
-    make_executable(&hook_path)?;
-
     let hooks_path = dir.join("hooks.json");
     let mut hooks_file = if hooks_path.is_file() {
         serde_json::from_str::<Value>(&fs::read_to_string(&hooks_path)?).map_err(|err| {
@@ -199,10 +199,7 @@ pub(crate) fn install_codex() -> io::Result<CodexInstallPaths> {
         10,
         None,
     )?;
-    remove_legacy_bash_hook_file(&hook_path)?;
-
-    write_config(&hooks_path, serde_json::to_string_pretty(&hooks_file)?)?;
-
+    let updated_hooks = serde_json::to_string_pretty(&hooks_file)?;
     let config_path = dir.join("config.toml");
     let existing_config = if config_path.is_file() {
         fs::read_to_string(&config_path)?
@@ -210,6 +207,11 @@ pub(crate) fn install_codex() -> io::Result<CodexInstallPaths> {
         String::new()
     };
     let new_config = build_codex_config_with_hooks(&existing_config);
+
+    fs::write(&hook_path, CODEX_HOOK_ASSET)?;
+    make_executable(&hook_path)?;
+    remove_legacy_bash_hook_file(&hook_path)?;
+    write_config(&hooks_path, updated_hooks)?;
     if new_config != existing_config {
         write_config(&config_path, new_config)?;
     }
