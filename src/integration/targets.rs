@@ -13,11 +13,11 @@ use super::command::powershell_encoded_hook_command;
 #[cfg(not(windows))]
 use super::command::shell_single_quote;
 use super::config_edit::{
-    build_codex_config_with_hooks, build_kimi_config_with_hooks, ensure_command_hook,
-    ensure_direct_command_hook, ensure_flat_command_hook, ensure_hermes_plugin_enabled,
-    ensure_hooks_object, ensure_simple_command_hook, hooks_object_if_present,
-    remove_direct_hook_commands, remove_flat_command_hook, remove_hermes_plugin_enabled,
-    remove_hook_commands, remove_kimi_config_block, remove_simple_command_hook,
+    build_kimi_config_with_hooks, ensure_command_hook, ensure_direct_command_hook,
+    ensure_flat_command_hook, ensure_hermes_plugin_enabled, ensure_hooks_object,
+    ensure_simple_command_hook, hooks_object_if_present, remove_direct_hook_commands,
+    remove_flat_command_hook, remove_hermes_plugin_enabled, remove_hook_commands,
+    remove_kimi_config_block, remove_simple_command_hook,
 };
 use super::config_file::{check_config_targets, write_config};
 use super::env::{
@@ -34,25 +34,25 @@ use super::opencode_config::{
 };
 use super::types::{
     AntigravityCliInstallPaths, AntigravityCliUninstallResult, ClaudeInstallPaths,
-    ClaudeUninstallResult, CodexInstallPaths, CodexUninstallResult, CopilotInstallPaths,
-    CopilotUninstallResult, CursorInstallPaths, CursorUninstallResult, DevinInstallPaths,
-    DevinUninstallResult, DroidInstallPaths, DroidUninstallResult, GrokInstallPaths,
-    GrokUninstallResult, HermesInstallPaths, HermesUninstallResult, KiloInstallPaths,
-    KiloUninstallResult, KimiInstallPaths, KimiUninstallResult, LettaInstallPaths,
-    LettaUninstallResult, MastracodeInstallPaths, MastracodeUninstallResult, OmpInstallPaths,
-    OmpUninstallResult, OpenCodeInstallPaths, OpenCodeUninstallResult, PiUninstallResult,
-    QodercliInstallPaths, QodercliUninstallResult, QwenInstallPaths, QwenUninstallResult,
+    ClaudeUninstallResult, CodexUninstallResult, CopilotInstallPaths, CopilotUninstallResult,
+    CursorInstallPaths, CursorUninstallResult, DevinInstallPaths, DevinUninstallResult,
+    DroidInstallPaths, DroidUninstallResult, GrokInstallPaths, GrokUninstallResult,
+    HermesInstallPaths, HermesUninstallResult, KiloInstallPaths, KiloUninstallResult,
+    KimiInstallPaths, KimiUninstallResult, LettaInstallPaths, LettaUninstallResult,
+    MastracodeInstallPaths, MastracodeUninstallResult, OmpInstallPaths, OmpUninstallResult,
+    OpenCodeInstallPaths, OpenCodeUninstallResult, PiUninstallResult, QodercliInstallPaths,
+    QodercliUninstallResult, QwenInstallPaths, QwenUninstallResult,
 };
 use super::{
     ANTIGRAVITY_CLI_HOOK_ASSET, ANTIGRAVITY_CLI_HOOK_BLOCK_NAME, ANTIGRAVITY_CLI_HOOK_EVENTS,
     ANTIGRAVITY_CLI_HOOK_INSTALL_NAME, ANTIGRAVITY_CLI_HOOK_TIMEOUT_SEC, CLAUDE_HOOK_ASSET,
-    CLAUDE_HOOK_INSTALL_NAME, CODEX_HOOK_ASSET, CODEX_HOOK_INSTALL_NAME, COPILOT_HOOK_ASSET,
-    COPILOT_HOOK_EVENTS, COPILOT_HOOK_INSTALL_NAME, COPILOT_REMOVED_LIFECYCLE_HOOK_EVENTS,
-    CURSOR_HOOK_ASSET, CURSOR_HOOK_INSTALL_NAME, DEVIN_HOOK_ASSET, DEVIN_HOOK_EVENTS,
-    DEVIN_HOOK_INSTALL_NAME, DEVIN_REMOVED_LIFECYCLE_HOOK_EVENTS, DROID_HOOK_ASSET,
-    DROID_HOOK_EVENTS, DROID_HOOK_INSTALL_NAME, DROID_REMOVED_LIFECYCLE_HOOK_EVENTS,
-    GROK_HOOK_ASSET, GROK_HOOK_CONFIG_INSTALL_NAME, GROK_HOOK_INSTALL_NAME,
-    HERMES_PLUGIN_INIT_ASSET, HERMES_PLUGIN_INIT_INSTALL_NAME, HERMES_PLUGIN_MANIFEST_ASSET,
+    CLAUDE_HOOK_INSTALL_NAME, CODEX_HOOK_INSTALL_NAME, COPILOT_HOOK_ASSET, COPILOT_HOOK_EVENTS,
+    COPILOT_HOOK_INSTALL_NAME, COPILOT_REMOVED_LIFECYCLE_HOOK_EVENTS, CURSOR_HOOK_ASSET,
+    CURSOR_HOOK_INSTALL_NAME, DEVIN_HOOK_ASSET, DEVIN_HOOK_EVENTS, DEVIN_HOOK_INSTALL_NAME,
+    DEVIN_REMOVED_LIFECYCLE_HOOK_EVENTS, DROID_HOOK_ASSET, DROID_HOOK_EVENTS,
+    DROID_HOOK_INSTALL_NAME, DROID_REMOVED_LIFECYCLE_HOOK_EVENTS, GROK_HOOK_ASSET,
+    GROK_HOOK_CONFIG_INSTALL_NAME, GROK_HOOK_INSTALL_NAME, HERMES_PLUGIN_INIT_ASSET,
+    HERMES_PLUGIN_INIT_INSTALL_NAME, HERMES_PLUGIN_MANIFEST_ASSET,
     HERMES_PLUGIN_MANIFEST_INSTALL_NAME, KILO_PLUGIN_ASSET, KILO_PLUGIN_INSTALL_NAME,
     KIMI_HOOK_ASSET, KIMI_HOOK_INSTALL_NAME, LETTA_HOOK_ASSET, LETTA_HOOK_INSTALL_NAME,
     LETTA_HOOK_TIMEOUT_MS, MASTRACODE_HOOK_ASSET, MASTRACODE_HOOK_EVENTS,
@@ -157,71 +157,9 @@ pub(crate) fn install_claude() -> io::Result<ClaudeInstallPaths> {
     })
 }
 
-pub(crate) fn install_codex() -> io::Result<CodexInstallPaths> {
-    install_codex_at(codex_dir()?)
-}
-
-pub(crate) fn install_codex_at(dir: PathBuf) -> io::Result<CodexInstallPaths> {
-    check_config_targets(&dir, &["hooks.json", "config.toml"])?;
-    if !dir.is_dir() {
-        return Err(io::Error::other(format!(
-            "codex config directory not found at {}. install codex first",
-            dir.display()
-        )));
-    }
-
-    let hook_path = dir.join(CODEX_HOOK_INSTALL_NAME);
-    let hooks_path = dir.join("hooks.json");
-    let mut hooks_file = if hooks_path.is_file() {
-        serde_json::from_str::<Value>(&fs::read_to_string(&hooks_path)?).map_err(|err| {
-            io::Error::other(format!("failed to parse {}: {err}", hooks_path.display()))
-        })?
-    } else {
-        json!({})
-    };
-
-    let hooks = ensure_hooks_object(
-        &mut hooks_file,
-        &hooks_path,
-        "codex hooks file",
-        "codex hooks file hooks",
-    )?;
-    remove_hook_commands(hooks, "PermissionRequest", &hook_path, Some("blocked"))?;
-    remove_hook_commands(hooks, "SessionStart", &hook_path, Some("idle"))?;
-    remove_hook_commands(hooks, "UserPromptSubmit", &hook_path, Some("working"))?;
-    remove_hook_commands(hooks, "PreToolUse", &hook_path, Some("working"))?;
-    remove_hook_commands(hooks, "Stop", &hook_path, Some("idle"))?;
-    remove_hook_commands(hooks, "SessionStart", &hook_path, Some("session"))?;
-    ensure_command_hook(
-        hooks,
-        "SessionStart",
-        hook_command(&hook_path, Some("session")),
-        10,
-        None,
-    )?;
-    let updated_hooks = serde_json::to_string_pretty(&hooks_file)?;
-    let config_path = dir.join("config.toml");
-    let existing_config = if config_path.is_file() {
-        fs::read_to_string(&config_path)?
-    } else {
-        String::new()
-    };
-    let new_config = build_codex_config_with_hooks(&existing_config);
-
-    fs::write(&hook_path, CODEX_HOOK_ASSET)?;
-    make_executable(&hook_path)?;
-    remove_legacy_bash_hook_file(&hook_path)?;
-    write_config(&hooks_path, updated_hooks)?;
-    if new_config != existing_config {
-        write_config(&config_path, new_config)?;
-    }
-
-    Ok(CodexInstallPaths {
-        hook_path,
-        hooks_path,
-        config_path,
-    })
-}
+pub(crate) use super::codex_recovery::install_codex;
+#[cfg(test)]
+pub(crate) use super::codex_recovery::install_codex_at;
 
 pub(crate) fn install_kimi() -> io::Result<KimiInstallPaths> {
     let dir = kimi_dir()?;

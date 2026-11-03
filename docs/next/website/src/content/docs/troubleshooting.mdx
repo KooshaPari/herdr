@@ -118,3 +118,21 @@ herdr-server.log
 ```
 
 Set `HERDR_LOG=herdr=debug` for more detail. Include the current log and rotated siblings when reporting a problem. See [Configuration](/docs/configuration/#logs).
+
+## Codex installation recovery (experimental)
+
+A retained `.herdr-codex-install-in-progress` marker means that a Codex
+installation has run. A completed installation leaves a `READY` marker, which
+allows another install. An `IN-PROGRESS`, empty, or unrecognized marker blocks
+the next install, including after a failure before changing files.
+
+Stop all writers to the Codex configuration before inspecting the marker,
+current hook and configuration files, and any `.herdr-codex-backup-*` snapshot.
+A failure before snapshot creation may leave no backup. A complete snapshot
+contains `manifest.json`, which records which files existed before
+the attempt; files in that directory preserve their prior contents. Back up
+and compare the current files before deciding whether to restore. Retain the
+snapshot and marker until the state is understood, and resolve the marker only
+under exclusive ownership. A retained marker does not itself prove which
+writes completed, and this prototype does not provide atomic multi-file
+recovery or protect against uncooperative writers and power loss.

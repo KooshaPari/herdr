@@ -8,6 +8,7 @@ pub(crate) struct ClaudeInstallPaths {
 
 #[derive(Debug)]
 pub(crate) struct CodexInstallPaths {
+    pub backup_path: PathBuf,
     pub hook_path: PathBuf,
     pub hooks_path: PathBuf,
     pub config_path: PathBuf,
