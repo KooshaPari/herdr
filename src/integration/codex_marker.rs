@@ -1,7 +1,53 @@
+use std::fs::File;
+use std::io::{self, Read, Seek, Write};
+use std::path::Path;
+
+const READY: &[u8] = b"HERDR-CODEX-MARKER-1:READY\n";
+const ACTIVE: &[u8] = b"HERDR-CODEX-MARKER-1:IN-PROGRESS\n";
+
+pub(super) struct Marker(File);
+
+fn update(file: &mut File, state: &[u8]) -> io::Result<()> {
+    file.rewind()?;
+    file.set_len(0)?;
+    file.write_all(state)?;
+    file.sync_all()
+}
+
+impl Marker {
+    pub(super) fn complete(mut self) -> io::Result<()> {
+        update(&mut self.0, READY)
+    }
+}
+
+pub(super) fn acquire(path: &Path) -> io::Result<Marker> {
+    match crate::platform::create_config_temporary(path, true) {
+        Ok(mut initial) => {
+            initial.write_all(READY)?;
+            initial.sync_all()?;
+        }
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error),
+    }
+    let mut file = platform_marker::open_validated(path)?;
+    let mut contents = Vec::new();
+    (&mut file).take(1024).read_to_end(&mut contents)?;
+    if contents != READY {
+        return Err(io::Error::other("Codex install marker is incomplete or unrecognized; inspect it and backups before retrying"));
+    }
+    update(&mut file, ACTIVE)?;
+    Ok(Marker(file))
+}
+
+#[cfg(windows)]
+use native as platform_marker;
+#[cfg(unix)]
+use unix as platform_marker;
+
 #[cfg(windows)]
 mod native {
     use std::fs::{File, OpenOptions};
-    use std::io::{self, Read, Seek, Write};
+    use std::io;
     use std::os::windows::{
         fs::{MetadataExt, OpenOptionsExt},
         io::AsRawHandle,
@@ -11,24 +57,6 @@ mod native {
         GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_REPARSE_POINT,
         FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ, FILE_SHARE_WRITE,
     };
-
-    const READY: &[u8] = b"HERDR-CODEX-MARKER-1:READY\n";
-    const ACTIVE: &[u8] = b"HERDR-CODEX-MARKER-1:IN-PROGRESS\n";
-
-    pub(in crate::integration) struct Marker(File);
-
-    fn update(file: &mut File, state: &[u8]) -> io::Result<()> {
-        file.rewind()?;
-        file.set_len(0)?;
-        file.write_all(state)?;
-        file.sync_all()
-    }
-
-    impl Marker {
-        pub(in crate::integration) fn complete(mut self) -> io::Result<()> {
-            update(&mut self.0, READY)
-        }
-    }
 
     fn owner_is_current_user(owner: windows_sys::Win32::Security::PSID) -> io::Result<bool> {
         use std::ptr::null_mut;
@@ -147,16 +175,8 @@ mod native {
         assert!(!matches);
     }
 
-    pub(in crate::integration) fn acquire(path: &Path) -> io::Result<Marker> {
-        match crate::platform::create_config_temporary(path, true) {
-            Ok(mut initial) => {
-                initial.write_all(READY)?;
-                initial.sync_all()?;
-            }
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(error),
-        }
-        let mut file = OpenOptions::new()
+    pub(super) fn open_validated(path: &Path) -> io::Result<File> {
+        let file = OpenOptions::new()
             .read(true)
             .write(true)
             .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
@@ -181,51 +201,19 @@ mod native {
                 "Codex marker ACL is not the expected protected owner/SYSTEM ACL",
             ));
         }
-        let mut contents = Vec::new();
-        (&mut file).take(1024).read_to_end(&mut contents)?;
-        if contents != READY {
-            return Err(io::Error::other("Codex install marker is incomplete or unrecognized; inspect it and backups before retrying"));
-        }
-        update(&mut file, ACTIVE)?;
-        Ok(Marker(file))
+        Ok(file)
     }
 }
-
-#[cfg(windows)]
-pub(super) use native::acquire;
 
 #[cfg(unix)]
 mod unix {
     use std::fs::{File, OpenOptions};
-    use std::io::{self, Read, Seek, Write};
+    use std::io;
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
     use std::path::Path;
 
-    const READY: &[u8] = b"HERDR-CODEX-MARKER-1:READY\n";
-    const ACTIVE: &[u8] = b"HERDR-CODEX-MARKER-1:IN-PROGRESS\n";
-
-    pub(in crate::integration) struct Marker(File);
-    fn update(file: &mut File, state: &[u8]) -> io::Result<()> {
-        file.rewind()?;
-        file.set_len(0)?;
-        file.write_all(state)?;
-        file.sync_all()
-    }
-    impl Marker {
-        pub(in crate::integration) fn complete(mut self) -> io::Result<()> {
-            update(&mut self.0, READY)
-        }
-    }
-    pub(in crate::integration) fn acquire(path: &Path) -> io::Result<Marker> {
-        match crate::platform::create_config_temporary(path, true) {
-            Ok(mut initial) => {
-                initial.write_all(READY)?;
-                initial.sync_all()?;
-            }
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(error),
-        }
-        let mut file = OpenOptions::new()
+    pub(super) fn open_validated(path: &Path) -> io::Result<File> {
+        let file = OpenOptions::new()
             .read(true)
             .write(true)
             .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
@@ -239,15 +227,6 @@ mod unix {
             return Err(io::Error::other("Codex marker must be an owner-only, single-link regular file owned by the current user"));
         }
         file.try_lock().map_err(io::Error::other)?;
-        let mut contents = Vec::new();
-        (&mut file).take(1024).read_to_end(&mut contents)?;
-        if contents != READY {
-            return Err(io::Error::other("Codex install marker is incomplete or unrecognized; inspect it and backups before retrying"));
-        }
-        update(&mut file, ACTIVE)?;
-        Ok(Marker(file))
+        Ok(file)
     }
 }
-
-#[cfg(unix)]
-pub(super) use unix::acquire;
