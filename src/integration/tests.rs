@@ -1304,7 +1304,7 @@ fn codex_v2_integration_status_is_outdated() {
 
     assert_eq!(codex.path, hook_path);
     assert_eq!(codex.installed_version, Some(2));
-    assert_eq!(codex.expected_version, 8);
+    assert_eq!(codex.expected_version, CODEX_INTEGRATION_VERSION);
     assert_eq!(codex.state, IntegrationStatusKind::Outdated);
 
     std::env::remove_var("HOME");
@@ -4739,4 +4739,43 @@ fn grok_dir_honors_grok_home_after_config_dir_seam() {
     std::env::remove_var(GROK_HOME_ENV_VAR);
     clear_integration_path_env();
     let _ = fs::remove_dir_all(base);
+}
+
+#[cfg(windows)]
+#[test]
+fn codex_fork_version_identity_distinguishes_v8_v9_and_v10() {
+    let base = unique_base();
+    fs::create_dir_all(&base).unwrap();
+    let cases = [
+        (
+            "v8",
+            "# HERDR_INTEGRATION_VERSION=8\n",
+            IntegrationStatusKind::Outdated,
+        ),
+        (
+            "upstream-v9",
+            "# HERDR_INTEGRATION_VERSION=9\n",
+            IntegrationStatusKind::Outdated,
+        ),
+        (
+            "fork-v9",
+            "# HERDR_INTEGRATION_VERSION=9\n# HERDR_INTEGRATION_FORK=kooshapari-utf8-k0.1.0\n",
+            IntegrationStatusKind::Current,
+        ),
+        (
+            "upstream-v10",
+            "# HERDR_INTEGRATION_VERSION=10\n",
+            IntegrationStatusKind::Current,
+        ),
+    ];
+    for (name, content, expected) in cases {
+        let path = base.join(name);
+        fs::write(&path, content).unwrap();
+        let status = integration_status_at(
+            crate::api::schema::IntegrationTarget::Codex,
+            path,
+            CODEX_INTEGRATION_VERSION,
+        );
+        assert_eq!(status.state, expected, "{name}");
+    }
 }

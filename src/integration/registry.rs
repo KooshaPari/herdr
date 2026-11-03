@@ -468,6 +468,18 @@ pub(crate) fn integration_status_at(
 ) -> super::IntegrationStatus {
     let (mut state, installed_version) = integration_state_for_path(&path, expected_version);
 
+    #[cfg(windows)]
+    if target == crate::api::schema::IntegrationTarget::Codex
+        && installed_version == Some(9)
+        && !fs::read_to_string(&path).is_ok_and(|content| {
+            content
+                .lines()
+                .any(|line| line.trim() == "# HERDR_INTEGRATION_FORK=kooshapari-utf8-k0.1.0")
+        })
+    {
+        state = super::IntegrationStatusKind::Outdated;
+    }
+
     // Grok only invokes the hook when the herdr-owned `hooks/herdr.json`
     // registers it, so a current hook script with a missing or broken config
     // is a nonfunctional install: report it as outdated so `herdr integration
