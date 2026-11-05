@@ -128,6 +128,10 @@ fn install_target_inner(target: crate::api::schema::IntegrationTarget) -> io::Re
             let installed = install_codex()?;
             vec![
                 format!(
+                    "saved codex pre-install backup to {}",
+                    installed.backup_path.display()
+                ),
+                format!(
                     "installed codex integration hook to {}",
                     installed.hook_path.display()
                 ),

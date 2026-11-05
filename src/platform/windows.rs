@@ -308,6 +308,15 @@ fn config_security_sddl(
     Ok(result)
 }
 
+#[cfg(test)]
+pub(crate) fn test_config_backup_sddl(path: &std::path::Path) -> std::io::Result<String> {
+    use windows_sys::Win32::Security::{DACL_SECURITY_INFORMATION, LABEL_SECURITY_INFORMATION};
+    let flags = DACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION;
+    let mut descriptor = config_security_descriptor(path, flags)?;
+    let text = String::from_utf16_lossy(&config_security_sddl(&mut descriptor, flags)?);
+    Ok(text)
+}
+
 pub(crate) fn set_default_plugin_pane_pwd(
     _env: &mut Vec<(String, String)>,
     _cwd: &std::path::Path,

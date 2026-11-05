@@ -1,5 +1,9 @@
 mod actions;
 mod claude_settings;
+mod codex_marker;
+mod codex_recovery;
+#[cfg(test)]
+mod codex_recovery_tests;
 mod command;
 mod config_edit;
 mod config_file;
