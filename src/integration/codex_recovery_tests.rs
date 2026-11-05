@@ -302,56 +302,119 @@ fn install_codex_snapshot_lock_excludes_competing_process() {
 #[test]
 fn install_codex_snapshot_crash_retains_marker_and_blocks_retry() {
     if let Some(path) = std::env::var_os("HERDR_TEST_CRASH_FIXTURE") {
+        let crash_index = std::env::var("HERDR_TEST_CRASH_INDEX")
+            .unwrap()
+            .parse::<usize>()
+            .unwrap();
         let _ = install_codex_observed(PathBuf::from(path), |index| {
-            if index == 0 {
+            if index == crash_index {
                 std::process::exit(66);
             }
             Ok(())
         });
         std::process::exit(67);
     }
-    let base = unique_base();
-    fs::create_dir_all(&base).unwrap();
-    fs::write(base.join(CODEX_HOOK_INSTALL_NAME), "original hook").unwrap();
-    fs::write(base.join("hooks.json"), "{\"hooks\":{}}").unwrap();
-    fs::write(base.join("config.toml"), "model = \"original\"\n").unwrap();
-    let child = std::process::Command::new(std::env::current_exe().unwrap())
-        .args([
-            "--exact",
-            "integration::codex_recovery_tests::install_codex_snapshot_crash_retains_marker_and_blocks_retry",
-            "--nocapture",
-        ])
-        .env("HERDR_TEST_CRASH_FIXTURE", &base)
-        .status()
-        .unwrap();
-    assert_eq!(child.code(), Some(66));
-    assert!(base.join(".herdr-codex-install-in-progress").is_file());
-    let hook = base.join(CODEX_HOOK_INSTALL_NAME);
-    let after_crash = fs::read(&hook).unwrap();
-    let result = install_codex_at(base.clone());
-    assert!(result
-        .unwrap_err()
-        .to_string()
-        .contains("incomplete or unrecognized"));
-    assert_eq!(fs::read(&hook).unwrap(), after_crash);
-    let snapshots: Vec<_> = fs::read_dir(&base)
-        .unwrap()
-        .filter_map(Result::ok)
-        .filter(|entry| {
-            entry
-                .file_name()
-                .to_string_lossy()
-                .starts_with(".herdr-codex-backup-")
-        })
-        .collect();
-    assert_eq!(snapshots.len(), 1);
-    assert_eq!(
-        fs::read_to_string(snapshots[0].path().join(CODEX_HOOK_INSTALL_NAME)).unwrap(),
-        "original hook"
-    );
-    let _ = fs::remove_dir_all(base);
+    for (repeat, crash_index) in [false, true].into_iter().flat_map(|repeat| {
+        [usize::MAX, 0, 1, 2]
+            .into_iter()
+            .map(move |index| (repeat, index))
+    }) {
+        let base = unique_base();
+        fs::create_dir_all(&base).unwrap();
+        let originals = [
+            (CODEX_HOOK_INSTALL_NAME, "original hook"),
+            ("hooks.json", "{\"hooks\":{}}"),
+            ("config.toml", "model = \"original\"\n"),
+        ];
+        for (name, content) in originals {
+            fs::write(base.join(name), content).unwrap();
+        }
+        let permissions: Vec<_> = originals
+            .iter()
+            .map(|(name, _)| fs::metadata(base.join(name)).unwrap().permissions())
+            .collect();
+        let reference = install_codex_at(base.clone()).unwrap();
+        let installed: Vec<_> = originals
+            .iter()
+            .map(|(name, _)| fs::read(base.join(name)).unwrap())
+            .collect();
+        assert_eq!(installed[0], CODEX_HOOK_ASSET.as_bytes());
+        for ((name, content), permissions) in originals.iter().zip(permissions) {
+            fs::write(base.join(name), content).unwrap();
+            fs::set_permissions(base.join(name), permissions).unwrap();
+        }
+        let reference_dir = base.with_extension("reference");
+        if !repeat {
+            fs::create_dir(&reference_dir).unwrap();
+            fs::rename(
+                base.join(".herdr-codex-install-in-progress"),
+                reference_dir.join("marker"),
+            )
+            .unwrap();
+            fs::rename(&reference.backup_path, reference_dir.join("backup")).unwrap();
+            assert!(!base.join(".herdr-codex-install-in-progress").exists());
+        }
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "integration::codex_recovery_tests::install_codex_snapshot_crash_retains_marker_and_blocks_retry",
+                "--nocapture",
+            ])
+            .env("HERDR_TEST_CRASH_FIXTURE", &base)
+            .env("HERDR_TEST_CRASH_INDEX", crash_index.to_string())
+            .status()
+            .unwrap();
+        assert_eq!(child.code(), Some(66), "crash index {crash_index}");
+        assert!(base.join(".herdr-codex-install-in-progress").is_file());
+        let after_crash: Vec<_> = originals
+            .iter()
+            .map(|(name, _)| fs::read(base.join(name)).unwrap())
+            .collect();
+        for (index, ((name, original), actual)) in originals.iter().zip(&after_crash).enumerate() {
+            let expected = if crash_index != usize::MAX && index <= crash_index {
+                installed[index].as_slice()
+            } else {
+                original.as_bytes()
+            };
+            assert_eq!(actual, expected, "crash index {crash_index}, file {name}");
+        }
+        let snapshots: Vec<_> = fs::read_dir(&base)
+            .unwrap()
+            .map(|entry| entry.unwrap())
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".herdr-codex-backup-")
+            })
+            .collect();
+        assert_eq!(snapshots.len(), if repeat { 2 } else { 1 });
+        for snapshot in snapshots {
+            for (name, original) in originals {
+                assert_eq!(
+                    fs::read_to_string(snapshot.path().join(name)).unwrap(),
+                    original
+                );
+            }
+        }
+        let result = install_codex_at(base.clone());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("incomplete or unrecognized"));
+        for ((name, _), expected) in originals.iter().zip(&after_crash) {
+            assert_eq!(
+                fs::read(base.join(name)).unwrap(),
+                *expected,
+                "retry changed {name}"
+            );
+        }
+        let _ = fs::remove_dir_all(base);
+        if !repeat {
+            let _ = fs::remove_dir_all(reference_dir);
+        }
+    }
 }
-
 #[cfg(windows)]
 #[test]
 fn install_codex_snapshot_uses_protected_backup_acl() {
