@@ -17,6 +17,14 @@ mod psuedocon;
 
 use filedescriptor::OwnedHandle;
 
+fn termination_result(result: i32, last_error: impl FnOnce() -> IoError) -> IoResult<()> {
+    if result == 0 {
+        Err(last_error())
+    } else {
+        Ok(())
+    }
+}
+
 #[derive(Debug)]
 pub struct WinChild {
     proc: Mutex<OwnedHandle>,
@@ -39,21 +47,19 @@ impl WinChild {
     }
 
     fn do_kill(&mut self) -> IoResult<()> {
-        let proc = self.proc.lock().unwrap().try_clone().unwrap();
+        let proc = self
+            .proc
+            .lock()
+            .map_err(|_| IoError::other("child process handle lock poisoned"))?
+            .try_clone()?;
         let res = unsafe { TerminateProcess(proc.as_raw_handle() as _, 1) };
-        let err = IoError::last_os_error();
-        if res != 0 {
-            Err(err)
-        } else {
-            Ok(())
-        }
+        termination_result(res, IoError::last_os_error)
     }
 }
 
 impl ChildKiller for WinChild {
     fn kill(&mut self) -> IoResult<()> {
-        self.do_kill().ok();
-        Ok(())
+        self.do_kill()
     }
 
     fn clone_killer(&self) -> Box<dyn ChildKiller + Send + Sync> {
@@ -70,17 +76,28 @@ pub struct WinChildKiller {
 impl ChildKiller for WinChildKiller {
     fn kill(&mut self) -> IoResult<()> {
         let res = unsafe { TerminateProcess(self.proc.as_raw_handle() as _, 1) };
-        let err = IoError::last_os_error();
-        if res != 0 {
-            Err(err)
-        } else {
-            Ok(())
-        }
+        termination_result(res, IoError::last_os_error)
     }
 
     fn clone_killer(&self) -> Box<dyn ChildKiller + Send + Sync> {
         let proc = self.proc.try_clone().unwrap();
         Box::new(WinChildKiller { proc })
+    }
+}
+
+#[cfg(test)]
+mod termination_result_tests {
+    use super::*;
+
+    #[test]
+    fn successful_termination_does_not_read_stale_error() {
+        assert!(termination_result(1, || panic!("success must not read last error")).is_ok());
+    }
+
+    #[test]
+    fn failed_termination_returns_the_actual_error() {
+        let error = termination_result(0, || IoError::from_raw_os_error(5)).unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(5));
     }
 }
 
