@@ -9,6 +9,21 @@ import unittest
 
 @unittest.skipUnless(os.name == "nt", "Windows PowerShell integration")
 class CodexWindowsUtf8Test(unittest.TestCase):
+    def test_report_failure_is_private_and_fail_open(self):
+        root = pathlib.Path(__file__).resolve().parents[1]
+        hook = root / "src/integration/assets/codex/herdr-agent-state.ps1"
+        state = pathlib.Path(tempfile.mkdtemp(prefix="herdr-codex-report-"))
+        helper = state / "fake-herdr.cmd"
+        payload = {"hook_event_name": "SessionStart", "session_id": "private-session", "transcript_path": "private-transcript"}
+        env = os.environ.copy()
+        env.update({"HERDR_ENV": "1", "HERDR_PANE_ID": "private-pane", "HERDR_BIN_PATH": str(helper), "CODEX_THREAD_ID": payload["session_id"]})
+        for code in (0, 7):
+            helper.write_bytes(f"@echo private-stdout\r\n@echo private-stderr 1>&2\r\n@exit /b {code}\r\n".encode())
+            result = subprocess.run(["powershell", "-NoProfile", "-File", str(hook), "session"], input=json.dumps(payload).encode(), capture_output=True, env=env, timeout=20)
+            self.assertEqual(result.returncode, 0)
+            self.assertEqual(result.stdout, b"")
+            self.assertEqual(result.stderr.strip(), b"" if code == 0 else b"Herdr: session report failed.")
+
     def test_unicode_and_bom_preserve_session_and_millisecond_sequence(self):
         root = pathlib.Path(__file__).resolve().parents[1]
         hook = root / "src/integration/assets/codex/herdr-agent-state.ps1"

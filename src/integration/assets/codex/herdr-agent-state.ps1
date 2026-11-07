@@ -3,7 +3,7 @@
 # add custom hooks beside this file instead of editing it.
 # HERDR_INTEGRATION_ID=codex
 # HERDR_INTEGRATION_VERSION=9
-# HERDR_INTEGRATION_FORK=kooshapari-utf8-k0.1.0
+# HERDR_INTEGRATION_FORK=kooshapari-utf8-report-k0.1.1
 
 param([string]$Action = "")
 
@@ -46,5 +46,9 @@ try {
         $args += @("--session-start-source", "$($payload.source)")
     }
     & $herdr @args 2>$null | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        [Console]::Error.WriteLine("Herdr: session report failed.")
+    }
 } catch {
+    [Console]::Error.WriteLine("Herdr: session report failed.")
 }

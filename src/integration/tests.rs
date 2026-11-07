@@ -1312,6 +1312,13 @@ fn codex_v2_integration_status_is_outdated() {
 }
 
 #[test]
+fn codex_config_crlf_upgrade_is_idempotent() {
+    let first = build_codex_config_with_hooks("model = \"synthetic\"\r\n");
+    assert_eq!(first, "model = \"synthetic\"\n\n[features]\nhooks = true\n");
+    assert_eq!(build_codex_config_with_hooks(&first), first);
+}
+
+#[test]
 fn install_codex_writes_hook_and_updates_hooks_and_config() {
     let _lock = integration_env_lock();
     let base = unique_base();
@@ -4780,8 +4787,13 @@ fn codex_fork_version_identity_distinguishes_v8_v9_and_v10() {
             IntegrationStatusKind::Outdated,
         ),
         (
-            "fork-v9",
+            "previous-fork-v9",
             "# HERDR_INTEGRATION_VERSION=9\n# HERDR_INTEGRATION_FORK=kooshapari-utf8-k0.1.0\n",
+            IntegrationStatusKind::Outdated,
+        ),
+        (
+            "current-fork-v9",
+            "# HERDR_INTEGRATION_VERSION=9\n# HERDR_INTEGRATION_FORK=kooshapari-utf8-report-k0.1.1\n",
             IntegrationStatusKind::Current,
         ),
         (

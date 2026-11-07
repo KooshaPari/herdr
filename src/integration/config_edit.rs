@@ -767,7 +767,10 @@ pub(crate) fn build_codex_config_with_hooks(content: &str) -> String {
             return join_toml_lines(lines, trailing_newline);
         }
 
-        let mut result = content.trim_end_matches('\n').to_string();
+        let mut result = content
+            .replace("\r\n", "\n")
+            .trim_end_matches('\n')
+            .to_string();
         if !result.is_empty() {
             result.push('\n');
             result.push('\n');
