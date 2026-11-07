@@ -46,5 +46,9 @@ try {
         $args += @("--session-start-source", "$($payload.source)")
     }
     & $herdr @args 2>$null | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        [Console]::Error.WriteLine("Herdr: session report failed.")
+    }
 } catch {
+    [Console]::Error.WriteLine("Herdr: session report failed.")
 }
