@@ -474,7 +474,7 @@ pub(crate) fn integration_status_at(
         && !fs::read_to_string(&path).is_ok_and(|content| {
             content
                 .lines()
-                .any(|line| line.trim() == "# HERDR_INTEGRATION_FORK=kooshapari-utf8-k0.1.0")
+                .any(|line| line.trim() == "# HERDR_INTEGRATION_FORK=kooshapari-utf8-report-k0.1.1")
         })
     {
         state = super::IntegrationStatusKind::Outdated;

@@ -3,7 +3,7 @@
 # add custom hooks beside this file instead of editing it.
 # HERDR_INTEGRATION_ID=codex
 # HERDR_INTEGRATION_VERSION=9
-# HERDR_INTEGRATION_FORK=kooshapari-utf8-k0.1.0
+# HERDR_INTEGRATION_FORK=kooshapari-utf8-report-k0.1.1
 
 param([string]$Action = "")
 

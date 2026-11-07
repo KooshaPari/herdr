@@ -4780,8 +4780,13 @@ fn codex_fork_version_identity_distinguishes_v8_v9_and_v10() {
             IntegrationStatusKind::Outdated,
         ),
         (
-            "fork-v9",
+            "previous-fork-v9",
             "# HERDR_INTEGRATION_VERSION=9\n# HERDR_INTEGRATION_FORK=kooshapari-utf8-k0.1.0\n",
+            IntegrationStatusKind::Outdated,
+        ),
+        (
+            "current-fork-v9",
+            "# HERDR_INTEGRATION_VERSION=9\n# HERDR_INTEGRATION_FORK=kooshapari-utf8-report-k0.1.1\n",
             IntegrationStatusKind::Current,
         ),
         (
