@@ -1312,6 +1312,13 @@ fn codex_v2_integration_status_is_outdated() {
 }
 
 #[test]
+fn codex_config_crlf_upgrade_is_idempotent() {
+    let first = build_codex_config_with_hooks("model = \"synthetic\"\r\n");
+    assert_eq!(first, "model = \"synthetic\"\n\n[features]\nhooks = true\n");
+    assert_eq!(build_codex_config_with_hooks(&first), first);
+}
+
+#[test]
 fn install_codex_writes_hook_and_updates_hooks_and_config() {
     let _lock = integration_env_lock();
     let base = unique_base();
