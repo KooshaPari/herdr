@@ -82,6 +82,61 @@ impl App {
         changed
     }
 
+    fn handle_plugin_command_finished(
+        &mut self,
+        log_id: String,
+        finished_unix_ms: u64,
+        exit_code: Option<i32>,
+        stdout: String,
+        stderr: String,
+        error: Option<String>,
+    ) {
+        self.state.plugin_commands_in_flight =
+            self.state.plugin_commands_in_flight.saturating_sub(1);
+        if let Some(log) = self
+            .state
+            .plugin_command_logs
+            .iter_mut()
+            .find(|log| log.log_id == log_id)
+        {
+            log.finished_unix_ms = Some(finished_unix_ms);
+            log.exit_code = exit_code;
+            log.stdout = Some(stdout);
+            log.stderr = Some(stderr);
+            log.error = error;
+            log.status = if log.error.is_none() && log.exit_code == Some(0) {
+                crate::api::schema::PluginCommandStatus::Succeeded
+            } else {
+                crate::api::schema::PluginCommandStatus::Failed
+            };
+        }
+    }
+
+    fn take_overlay_state_on_pane_exit(
+        &mut self,
+        pane_id: crate::layout::PaneId,
+    ) -> Option<(OverlayPaneState, bool, bool, Option<bool>)> {
+        self.overlay_panes.remove(&pane_id).map(|overlay| {
+            let was_overlay_active =
+                self.state
+                    .is_active_pane(overlay.ws_idx, overlay.tab_idx, pane_id);
+            let tab_before_exit = self
+                .state
+                .workspaces
+                .get(overlay.ws_idx)
+                .and_then(|ws| ws.tabs.get(overlay.tab_idx));
+            let was_overlay_focused_in_tab =
+                tab_before_exit.is_some_and(|tab| tab.layout.focused() == pane_id);
+            let tab_zoomed_before_exit = tab_before_exit.map(|tab| tab.zoomed);
+            (
+                overlay,
+                was_overlay_active,
+                was_overlay_focused_in_tab,
+                tab_zoomed_before_exit,
+            )
+        })
+    }
+
     pub(crate) fn handle_internal_event(&mut self, ev: AppEvent) {
         let _ = self.handle_internal_event_with_pane_updates(ev);
     }
@@ -142,25 +197,14 @@ impl App {
             error,
         } = ev
         {
-            self.state.plugin_commands_in_flight =
-                self.state.plugin_commands_in_flight.saturating_sub(1);
-            if let Some(log) = self
-                .state
-                .plugin_command_logs
-                .iter_mut()
-                .find(|log| log.log_id == log_id)
-            {
-                log.finished_unix_ms = Some(finished_unix_ms);
-                log.exit_code = exit_code;
-                log.stdout = Some(stdout);
-                log.stderr = Some(stderr);
-                log.error = error;
-                log.status = if log.error.is_none() && log.exit_code == Some(0) {
-                    crate::api::schema::PluginCommandStatus::Succeeded
-                } else {
-                    crate::api::schema::PluginCommandStatus::Failed
-                };
-            }
+            self.handle_plugin_command_finished(
+                log_id,
+                finished_unix_ms,
+                exit_code,
+                stdout,
+                stderr,
+                error,
+            );
             return Vec::new();
         }
 
@@ -251,25 +295,7 @@ impl App {
         }
 
         let overlay_state = if let AppEvent::PaneDied { pane_id, .. } = &ev {
-            self.overlay_panes.remove(pane_id).map(|overlay| {
-                let was_overlay_active =
-                    self.state
-                        .is_active_pane(overlay.ws_idx, overlay.tab_idx, *pane_id);
-                let tab_before_exit = self
-                    .state
-                    .workspaces
-                    .get(overlay.ws_idx)
-                    .and_then(|ws| ws.tabs.get(overlay.tab_idx));
-                let was_overlay_focused_in_tab =
-                    tab_before_exit.is_some_and(|tab| tab.layout.focused() == *pane_id);
-                let tab_zoomed_before_exit = tab_before_exit.map(|tab| tab.zoomed);
-                (
-                    overlay,
-                    was_overlay_active,
-                    was_overlay_focused_in_tab,
-                    tab_zoomed_before_exit,
-                )
-            })
+            self.take_overlay_state_on_pane_exit(*pane_id)
         } else {
             None
         };
