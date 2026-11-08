@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Added
+- Per-agent-kind default CLI arguments via `[agents.<kind>] args = [...]`. Defaults are prepended to fresh launches and to automatic session restores; explicit `--args` are appended after them, so a later flag wins.
+
 ## [0.9.3] - 2026-09-29
 
 This is a hotfix release for v0.9.2. See the v0.9.2 notes for the full feature release: https://github.com/herdrdev/herdr/releases/tag/v0.9.2

@@ -16,7 +16,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use support::{
     cleanup_test_base, client_handshake, register_runtime_dir, register_spawned_herdr_pid,
-    unregister_spawned_herdr_pid, CURRENT_PROTOCOL,
+    unregister_spawned_herdr_pid, wait_for_socket, CURRENT_PROTOCOL, SERVER_SOCKET_WAIT,
 };
 
 fn unique_test_dir() -> PathBuf {
@@ -44,7 +44,7 @@ impl SpawnedHerdr {
 impl Drop for SpawnedHerdr {
     fn drop(&mut self) {
         let pid = self.child.process_id();
-        let _ = self.child.kill();
+        support::stop_spawned_herdr(&mut *self.child);
         self.close_master();
 
         if let Some(pid) = pid {
@@ -74,17 +74,6 @@ fn test_lock() -> MutexGuard<'static, ()> {
     LOCK.get_or_init(|| Mutex::new(()))
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
-fn wait_for_socket(path: &Path, timeout: Duration) {
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        if path.exists() && UnixStream::connect(path).is_ok() {
-            return;
-        }
-        thread::sleep(Duration::from_millis(25));
-    }
-    panic!("socket did not appear at {}", path.display());
 }
 
 fn wait_for_file(path: &Path, timeout: Duration) {
@@ -123,6 +112,7 @@ fn spawn_server(
         .unwrap();
 
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
+    support::isolate_herdr_test_process(&mut cmd);
     cmd.arg("server");
     cmd.env("XDG_CONFIG_HOME", config_home);
     cmd.env("XDG_RUNTIME_DIR", runtime_dir);
@@ -169,7 +159,7 @@ fn server_creates_both_sockets() {
     let spawned = spawn_server(&config_home, &runtime_dir, &api_socket, &client_socket);
 
     // Wait for both sockets to appear.
-    wait_for_socket(&api_socket, Duration::from_secs(10));
+    wait_for_socket(&api_socket, SERVER_SOCKET_WAIT);
     wait_for_file(&client_socket, Duration::from_secs(10));
 
     // Verify the client socket is a socket file.
@@ -202,7 +192,7 @@ fn server_starts_without_terminal() {
     let spawned = spawn_server(&config_home, &runtime_dir, &api_socket, &client_socket);
 
     // Wait for the API socket to appear — proves the server started.
-    wait_for_socket(&api_socket, Duration::from_secs(10));
+    wait_for_socket(&api_socket, SERVER_SOCKET_WAIT);
 
     // The server process should be running.
     if let Some(pid) = spawned.child.process_id() {
@@ -223,7 +213,7 @@ fn server_api_responds_to_ping() {
     let client_socket = runtime_dir.join("herdr-client.sock");
 
     let spawned = spawn_server(&config_home, &runtime_dir, &api_socket, &client_socket);
-    wait_for_socket(&api_socket, Duration::from_secs(10));
+    wait_for_socket(&api_socket, SERVER_SOCKET_WAIT);
 
     // Ping the API socket.
     let response = ping_socket(&api_socket);
@@ -245,11 +235,11 @@ fn server_removes_client_socket_on_exit() {
     let client_socket = runtime_dir.join("herdr-client.sock");
 
     let mut spawned = spawn_server(&config_home, &runtime_dir, &api_socket, &client_socket);
-    wait_for_socket(&api_socket, Duration::from_secs(10));
+    wait_for_socket(&api_socket, SERVER_SOCKET_WAIT);
     wait_for_file(&client_socket, Duration::from_secs(10));
 
-    // Kill the server.
-    let _ = spawned.child.kill();
+    // Stop the server.
+    support::stop_spawned_herdr(&mut *spawned.child);
     spawned.close_master();
     let _ = spawned.child.wait();
 
@@ -288,7 +278,7 @@ fn server_cleans_up_stale_client_socket() {
 
     // Now start the server — it should clean up the stale socket.
     let spawned = spawn_server(&config_home, &runtime_dir, &api_socket, &client_socket);
-    wait_for_socket(&api_socket, Duration::from_secs(10));
+    wait_for_socket(&api_socket, SERVER_SOCKET_WAIT);
 
     // The API should work.
     let response = ping_socket(&api_socket);
@@ -310,7 +300,7 @@ fn server_persists_after_client_disconnect() {
     let client_socket = runtime_dir.join("herdr-client.sock");
 
     let spawned = spawn_server(&config_home, &runtime_dir, &api_socket, &client_socket);
-    wait_for_socket(&api_socket, Duration::from_secs(10));
+    wait_for_socket(&api_socket, SERVER_SOCKET_WAIT);
     wait_for_file(&client_socket, Duration::from_secs(10));
 
     // Connect to the client socket and then immediately disconnect.
@@ -343,7 +333,7 @@ fn duplicate_server_start_fails_gracefully() {
 
     // Start the first server.
     let spawned1 = spawn_server(&config_home, &runtime_dir, &api_socket, &client_socket);
-    wait_for_socket(&api_socket, Duration::from_secs(10));
+    wait_for_socket(&api_socket, SERVER_SOCKET_WAIT);
 
     // Try to start a second server — it should fail.
     let pair = native_pty_system()
@@ -356,6 +346,7 @@ fn duplicate_server_start_fails_gracefully() {
         .unwrap();
 
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
+    support::isolate_herdr_test_process(&mut cmd);
     cmd.arg("server");
     cmd.env("XDG_CONFIG_HOME", &config_home);
     cmd.env("XDG_RUNTIME_DIR", &runtime_dir);
@@ -388,7 +379,7 @@ fn client_handshake_succeeds() {
     let client_socket = runtime_dir.join("herdr-client.sock");
 
     let spawned = spawn_server(&config_home, &runtime_dir, &api_socket, &client_socket);
-    wait_for_socket(&api_socket, Duration::from_secs(10));
+    wait_for_socket(&api_socket, SERVER_SOCKET_WAIT);
     wait_for_file(&client_socket, Duration::from_secs(10));
 
     // Connect to the client socket and perform a handshake.
@@ -421,7 +412,7 @@ fn client_handshake_rejects_incompatible_version() {
     let client_socket = runtime_dir.join("herdr-client.sock");
 
     let spawned = spawn_server(&config_home, &runtime_dir, &api_socket, &client_socket);
-    wait_for_socket(&api_socket, Duration::from_secs(10));
+    wait_for_socket(&api_socket, SERVER_SOCKET_WAIT);
     wait_for_file(&client_socket, Duration::from_secs(10));
 
     // Connect to the client socket and send Hello with version 0 (pre-persistence).
@@ -452,7 +443,7 @@ fn client_handshake_clamps_small_terminal_size() {
     let client_socket = runtime_dir.join("herdr-client.sock");
 
     let spawned = spawn_server(&config_home, &runtime_dir, &api_socket, &client_socket);
-    wait_for_socket(&api_socket, Duration::from_secs(10));
+    wait_for_socket(&api_socket, SERVER_SOCKET_WAIT);
     wait_for_file(&client_socket, Duration::from_secs(10));
 
     // Send Hello with 0x0 terminal size — should be clamped.
@@ -484,7 +475,7 @@ fn no_hello_client_closed_within_five_seconds() {
     let client_socket = runtime_dir.join("herdr-client.sock");
 
     let spawned = spawn_server(&config_home, &runtime_dir, &api_socket, &client_socket);
-    wait_for_socket(&api_socket, Duration::from_secs(10));
+    wait_for_socket(&api_socket, SERVER_SOCKET_WAIT);
     wait_for_file(&client_socket, Duration::from_secs(10));
 
     // Connect but don't send Hello — just a raw connection.
@@ -532,6 +523,117 @@ fn no_hello_client_closed_within_five_seconds() {
         response.contains("pong"),
         "server should still respond to ping: {response}"
     );
+
+    cleanup_spawned_herdr(spawned, base);
+}
+
+fn server_log_path(config_home: &Path) -> PathBuf {
+    let app_dir_name = if cfg!(debug_assertions) {
+        "herdr-dev"
+    } else {
+        "herdr"
+    };
+    config_home.join(app_dir_name).join("herdr-server.log")
+}
+
+fn wait_for_exit(child: &mut Box<dyn Child + Send + Sync>, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if child.try_wait().ok().flatten().is_some() {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    false
+}
+
+fn wait_for_log_line(path: &Path, needle: &str, timeout: Duration) -> String {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        let content = fs::read_to_string(path).unwrap_or_default();
+        if let Some(line) = content.lines().find(|line| line.contains(needle)) {
+            return line.to_string();
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    panic!(
+        "log {} did not contain {needle:?}:\n{}",
+        path.display(),
+        fs::read_to_string(path).unwrap_or_default()
+    );
+}
+
+#[test]
+fn server_survives_hangup_and_logs_why_it_stops() {
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let api_socket = runtime_dir.join("herdr.sock");
+    let client_socket = runtime_dir.join("herdr-client.sock");
+
+    let mut spawned = spawn_server(&config_home, &runtime_dir, &api_socket, &client_socket);
+    wait_for_socket(&api_socket, SERVER_SOCKET_WAIT);
+    let pid = spawned.child.process_id().expect("server pid") as libc::pid_t;
+
+    assert_eq!(unsafe { libc::kill(pid, libc::SIGHUP) }, 0);
+    // Closing the terminal hangs up the server's whole session too.
+    spawned.close_master();
+    assert!(
+        !wait_for_exit(&mut spawned.child, Duration::from_millis(500)),
+        "server must not stop on SIGHUP"
+    );
+    assert!(ping_socket(&api_socket).contains("pong"));
+
+    assert_eq!(unsafe { libc::kill(pid, libc::SIGTERM) }, 0);
+    assert!(
+        wait_for_exit(&mut spawned.child, Duration::from_secs(10)),
+        "server must stop on SIGTERM"
+    );
+    let line = wait_for_log_line(
+        &server_log_path(&config_home),
+        "server shutdown initiated",
+        Duration::from_secs(5),
+    );
+    assert!(line.contains("reason=SIGTERM"), "{line}");
+
+    cleanup_spawned_herdr(spawned, base);
+}
+
+#[test]
+fn server_stop_request_logs_its_caller() {
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let api_socket = runtime_dir.join("herdr.sock");
+    let client_socket = runtime_dir.join("herdr-client.sock");
+
+    let mut spawned = spawn_server(&config_home, &runtime_dir, &api_socket, &client_socket);
+    wait_for_socket(&api_socket, SERVER_SOCKET_WAIT);
+
+    let mut stream = UnixStream::connect(&api_socket).unwrap();
+    writeln!(
+        stream,
+        r#"{{"id":"stop","method":"server.stop","params":{{}}}}"#
+    )
+    .unwrap();
+    let mut response = String::new();
+    BufReader::new(stream).read_line(&mut response).unwrap();
+    assert!(response.contains("\"ok\""), "{response}");
+
+    assert!(wait_for_exit(&mut spawned.child, Duration::from_secs(10)));
+    let line = wait_for_log_line(
+        &server_log_path(&config_home),
+        "server shutdown initiated",
+        Duration::from_secs(5),
+    );
+    let expected = if cfg!(any(target_os = "linux", target_os = "macos")) {
+        format!("server.stop request from pid {}", std::process::id())
+    } else {
+        "server.stop request".to_string()
+    };
+    assert!(line.contains(&expected), "{line}");
 
     cleanup_spawned_herdr(spawned, base);
 }

@@ -17,7 +17,7 @@ use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize}
 use serde_json::Value;
 use support::{
     cleanup_test_base, register_runtime_dir, register_spawned_herdr_pid,
-    unregister_spawned_herdr_pid,
+    unregister_spawned_herdr_pid, wait_for_socket, SERVER_SOCKET_WAIT,
 };
 
 fn unique_test_dir() -> PathBuf {
@@ -39,7 +39,7 @@ struct SpawnedHerdr {
 impl Drop for SpawnedHerdr {
     fn drop(&mut self) {
         let pid = self.child.process_id();
-        let _ = self.child.kill();
+        support::stop_spawned_herdr(&mut *self.child);
 
         if let Some(pid) = pid {
             let deadline = Instant::now() + Duration::from_secs(2);
@@ -61,17 +61,6 @@ impl Drop for SpawnedHerdr {
 fn cleanup_spawned_herdr(spawned: SpawnedHerdr, base: PathBuf) {
     drop(spawned);
     cleanup_test_base(&base);
-}
-
-fn wait_for_socket(path: &Path, timeout: Duration) {
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        if path.exists() && UnixStream::connect(path).is_ok() {
-            return;
-        }
-        thread::sleep(Duration::from_millis(25));
-    }
-    panic!("socket did not appear at {}", path.display());
 }
 
 fn test_lock() -> MutexGuard<'static, ()> {
@@ -106,6 +95,7 @@ fn spawn_server(
         .unwrap();
 
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
+    support::isolate_herdr_test_process(&mut cmd);
     cmd.arg("server");
     cmd.env("XDG_CONFIG_HOME", config_home);
     cmd.env("XDG_RUNTIME_DIR", runtime_dir);
@@ -150,6 +140,7 @@ fn spawn_herdr_auto(
         .unwrap();
 
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
+    support::isolate_herdr_test_process(&mut cmd);
     // No subcommand → auto-detect launch.
     cmd.env("XDG_CONFIG_HOME", config_home);
     cmd.env("XDG_RUNTIME_DIR", runtime_dir);
@@ -329,8 +320,8 @@ fn auto_detect_no_server_spawns_server_and_attaches() {
     let herdr = spawn_herdr_auto(&config_home, &runtime_dir, &api_socket, &client_socket);
 
     // Wait for both sockets to appear (server was spawned).
-    wait_for_socket(&api_socket, Duration::from_secs(10));
-    wait_for_socket(&client_socket, Duration::from_secs(10));
+    wait_for_socket(&api_socket, SERVER_SOCKET_WAIT);
+    wait_for_socket(&client_socket, SERVER_SOCKET_WAIT);
 
     // Verify the API socket responds to ping (server is running).
     let response = ping_socket(&api_socket);
@@ -366,8 +357,8 @@ fn auto_detect_server_running_attaches_directly() {
 
     // Start a server explicitly.
     let server = spawn_server(&config_home, &runtime_dir, &api_socket, &client_socket);
-    wait_for_socket(&api_socket, Duration::from_secs(10));
-    wait_for_socket(&client_socket, Duration::from_secs(10));
+    wait_for_socket(&api_socket, SERVER_SOCKET_WAIT);
+    wait_for_socket(&client_socket, SERVER_SOCKET_WAIT);
 
     let server_pid = server.child.process_id().expect("server should have PID");
 
@@ -420,8 +411,8 @@ fn auto_detect_socket_path_consistency() {
     let herdr = spawn_herdr_auto(&config_home, &runtime_dir, &api_socket, &client_socket);
 
     // Wait for both sockets to appear at the custom paths.
-    wait_for_socket(&api_socket, Duration::from_secs(10));
-    wait_for_socket(&client_socket, Duration::from_secs(10));
+    wait_for_socket(&api_socket, SERVER_SOCKET_WAIT);
+    wait_for_socket(&client_socket, SERVER_SOCKET_WAIT);
 
     // Verify sockets exist at the specified paths.
     assert!(
@@ -460,8 +451,8 @@ fn cli_subcommands_work_through_server() {
 
     // Start a server.
     let server = spawn_server(&config_home, &runtime_dir, &api_socket, &client_socket);
-    wait_for_socket(&api_socket, Duration::from_secs(10));
-    wait_for_socket(&client_socket, Duration::from_secs(10));
+    wait_for_socket(&api_socket, SERVER_SOCKET_WAIT);
+    wait_for_socket(&client_socket, SERVER_SOCKET_WAIT);
 
     // Test `herdr workspace list` through the server's API socket.
     let output = run_cli(&api_socket, &["workspace", "list"]);
@@ -506,8 +497,8 @@ fn auto_detect_server_persists_and_reattaches() {
 
     // Run `herdr` — auto-detect spawns server + attaches client.
     let mut client1 = spawn_herdr_auto(&config_home, &runtime_dir, &api_socket, &client_socket);
-    wait_for_socket(&api_socket, Duration::from_secs(10));
-    wait_for_socket(&client_socket, Duration::from_secs(10));
+    wait_for_socket(&api_socket, SERVER_SOCKET_WAIT);
+    wait_for_socket(&client_socket, SERVER_SOCKET_WAIT);
 
     // Verify API responds.
     let response = ping_socket(&api_socket);
@@ -600,6 +591,7 @@ fn auto_detect_default_socket_path_from_config_dir() {
         .unwrap();
 
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
+    support::isolate_herdr_test_process(&mut cmd);
     cmd.arg("server");
     cmd.env("XDG_CONFIG_HOME", &config_home);
     cmd.env("XDG_RUNTIME_DIR", &runtime_dir);
@@ -618,8 +610,8 @@ fn auto_detect_default_socket_path_from_config_dir() {
     };
 
     // Wait for sockets to appear at the default config-dir paths.
-    wait_for_socket(&api_socket, Duration::from_secs(10));
-    wait_for_socket(&client_socket, Duration::from_secs(10));
+    wait_for_socket(&api_socket, SERVER_SOCKET_WAIT);
+    wait_for_socket(&client_socket, SERVER_SOCKET_WAIT);
 
     // Verify both sockets exist.
     assert!(api_socket.exists(), "API socket should exist in config dir");
@@ -648,8 +640,8 @@ fn auto_detect_writes_client_and_server_logs_to_separate_files() {
     let client_socket = runtime_dir.join("herdr-client.sock");
 
     let spawned = spawn_herdr_auto(&config_home, &runtime_dir, &api_socket, &client_socket);
-    wait_for_socket(&api_socket, Duration::from_secs(10));
-    wait_for_socket(&client_socket, Duration::from_secs(10));
+    wait_for_socket(&api_socket, SERVER_SOCKET_WAIT);
+    wait_for_socket(&client_socket, SERVER_SOCKET_WAIT);
 
     let app_dir_name = if cfg!(debug_assertions) {
         "herdr-dev"
@@ -691,8 +683,8 @@ fn auto_detect_respects_nested_guard_before_auto_attach() {
     let client_socket = runtime_dir.join("herdr-client.sock");
 
     let server = spawn_server(&config_home, &runtime_dir, &api_socket, &client_socket);
-    wait_for_socket(&api_socket, Duration::from_secs(10));
-    wait_for_socket(&client_socket, Duration::from_secs(10));
+    wait_for_socket(&api_socket, SERVER_SOCKET_WAIT);
+    wait_for_socket(&client_socket, SERVER_SOCKET_WAIT);
 
     let baseline = read_json_line({
         let mut stream = UnixStream::connect(&api_socket).unwrap();

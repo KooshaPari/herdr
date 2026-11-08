@@ -13,9 +13,27 @@
       ]
     },
     {
+      "id": "agents",
+      "title": "Agents",
+      "keys": [
+        {
+          "key": "agents",
+          "type": "table of agent args",
+          "default": "{}",
+          "description": "Per-agent-kind default CLI args keyed by canonical agent kind (e.g. [agents.jcode] args = [\"--model\", \"...\"]). Defaults are prepended to every launch of that kind; user-supplied --args are appended after them, so a later user flag overrides an earlier default flag. Unknown agent kinds are ignored with a diagnostic."
+        }
+      ]
+    },
+    {
       "id": "server",
       "title": "Server",
       "keys": [
+        {
+          "key": "server.allow_unelevated_clients",
+          "type": "boolean",
+          "default": "false",
+          "description": "Windows only: allow ordinary clients from the same account to control an elevated server and its administrator panes. Applies at server startup and requires a restart; config reload does not change access. The --allow-unelevated-clients startup flag enables sharing even when this setting is false."
+        },
         {
           "key": "server.headless_cols",
           "type": "integer",

@@ -16,9 +16,9 @@ use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize}
 use serde_json::{json, Value};
 use support::{
     cleanup_test_base, client_shell_handshake, register_runtime_dir, register_spawned_herdr_pid,
-    unregister_spawned_herdr_pid, CURRENT_ENDPOINT_PROTOCOL_GENERATION as CURRENT_PROTOCOL,
-    SERVER_MESSAGE_ENDPOINT_CONTROL, SERVER_MESSAGE_PANE_SURFACE,
-    SERVER_MESSAGE_PANE_SURFACE_PATCH,
+    unregister_spawned_herdr_pid, wait_for_socket,
+    CURRENT_ENDPOINT_PROTOCOL_GENERATION as CURRENT_PROTOCOL, SERVER_MESSAGE_ENDPOINT_CONTROL,
+    SERVER_MESSAGE_PANE_SURFACE, SERVER_MESSAGE_PANE_SURFACE_PATCH, SERVER_SOCKET_WAIT,
 };
 
 fn unique_test_dir() -> PathBuf {
@@ -46,7 +46,7 @@ impl SpawnedHerdr {
 impl Drop for SpawnedHerdr {
     fn drop(&mut self) {
         let pid = self.child.process_id();
-        let _ = self.child.kill();
+        support::stop_spawned_herdr(&mut *self.child);
         self.close_master();
 
         if let Some(pid) = pid {
@@ -78,17 +78,6 @@ fn test_lock() -> MutexGuard<'static, ()> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-fn wait_for_socket(path: &Path, timeout: Duration) {
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        if path.exists() && UnixStream::connect(path).is_ok() {
-            return;
-        }
-        thread::sleep(Duration::from_millis(25));
-    }
-    panic!("socket did not appear at {}", path.display());
-}
-
 fn spawn_server(config_home: &Path, runtime_dir: &Path, api_socket_path: &Path) -> SpawnedHerdr {
     spawn_server_with_path(config_home, runtime_dir, api_socket_path, None)
 }
@@ -118,6 +107,7 @@ fn spawn_server_with_path(
         .unwrap();
 
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
+    support::isolate_herdr_test_process(&mut cmd);
     cmd.arg("server");
     cmd.env("XDG_STATE_HOME", runtime_dir.join("state"));
     cmd.env("XDG_CONFIG_HOME", config_home);
@@ -156,6 +146,7 @@ fn spawn_client_process(
         .unwrap();
 
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
+    support::isolate_herdr_test_process(&mut cmd);
     cmd.arg("client");
     cmd.env("HERDR_DISABLE_SOUND", "1");
     cmd.env("XDG_STATE_HOME", runtime_dir.join("state"));
@@ -483,8 +474,8 @@ fn cross_area_detach_and_reattach_preserves_state() {
     let client_socket = runtime_dir.join("herdr-client.sock");
 
     let server = spawn_server(&config_home, &runtime_dir, &api_socket);
-    wait_for_socket(&api_socket, Duration::from_secs(10));
-    wait_for_socket(&client_socket, Duration::from_secs(10));
+    wait_for_socket(&api_socket, SERVER_SOCKET_WAIT);
+    wait_for_socket(&client_socket, SERVER_SOCKET_WAIT);
 
     // Local attach (client A).
     let mut client_a = UnixStream::connect(&client_socket).expect("client A should connect");
@@ -577,8 +568,8 @@ fn cross_area_agent_process_survives_detach_and_reattach() {
         &api_socket,
         Some(Path::new(&path_override)),
     );
-    wait_for_socket(&api_socket, Duration::from_secs(10));
-    wait_for_socket(&client_socket, Duration::from_secs(10));
+    wait_for_socket(&api_socket, SERVER_SOCKET_WAIT);
+    wait_for_socket(&client_socket, SERVER_SOCKET_WAIT);
 
     let mut client_a = UnixStream::connect(&client_socket).expect("client A should connect");
     client_shell_handshake(&mut client_a, CURRENT_PROTOCOL, 100, 30).expect("shell handshake");
@@ -661,8 +652,8 @@ fn cross_area_client_and_api_workspace_views_are_consistent() {
     let client_socket = runtime_dir.join("herdr-client.sock");
 
     let server = spawn_server(&config_home, &runtime_dir, &api_socket);
-    wait_for_socket(&api_socket, Duration::from_secs(10));
-    wait_for_socket(&client_socket, Duration::from_secs(10));
+    wait_for_socket(&api_socket, SERVER_SOCKET_WAIT);
+    wait_for_socket(&client_socket, SERVER_SOCKET_WAIT);
 
     let mut client = UnixStream::connect(&client_socket).expect("client should connect");
     client_shell_handshake(&mut client, CURRENT_PROTOCOL, 100, 30).expect("shell handshake");
@@ -715,8 +706,8 @@ fn cross_area_two_clients_shared_view_and_single_detach_stability() {
     let client_socket = runtime_dir.join("herdr-client.sock");
 
     let server = spawn_server(&config_home, &runtime_dir, &api_socket);
-    wait_for_socket(&api_socket, Duration::from_secs(10));
-    wait_for_socket(&client_socket, Duration::from_secs(10));
+    wait_for_socket(&api_socket, SERVER_SOCKET_WAIT);
+    wait_for_socket(&client_socket, SERVER_SOCKET_WAIT);
 
     let mut client_a = UnixStream::connect(&client_socket).expect("client A should connect");
     client_shell_handshake(&mut client_a, CURRENT_PROTOCOL, 110, 30).expect("shell handshake");
@@ -787,8 +778,8 @@ fn cross_area_server_kill_then_restart_and_reconnect() {
     let client_socket = runtime_dir.join("herdr-client.sock");
 
     let mut server = spawn_server(&config_home, &runtime_dir, &api_socket);
-    wait_for_socket(&api_socket, Duration::from_secs(10));
-    wait_for_socket(&client_socket, Duration::from_secs(10));
+    wait_for_socket(&api_socket, SERVER_SOCKET_WAIT);
+    wait_for_socket(&client_socket, SERVER_SOCKET_WAIT);
 
     // Attach a real thin client process and prove it reached attached state
     // by observing an incoming frame on its PTY stream.
@@ -890,8 +881,8 @@ fn cross_area_server_kill_then_restart_and_reconnect() {
 
     // Restart server and verify new client can connect (stale socket cleaned).
     let server2 = spawn_server(&config_home, &runtime_dir, &api_socket);
-    wait_for_socket(&api_socket, Duration::from_secs(10));
-    wait_for_socket(&client_socket, Duration::from_secs(10));
+    wait_for_socket(&api_socket, SERVER_SOCKET_WAIT);
+    wait_for_socket(&client_socket, SERVER_SOCKET_WAIT);
 
     let mut reconnect_client =
         UnixStream::connect(&client_socket).expect("new client should connect after restart");

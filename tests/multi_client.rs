@@ -18,8 +18,8 @@ use support::{
     cleanup_test_base, client_shell_handshake, drain_messages, register_runtime_dir,
     register_spawned_herdr_pid, send_client_shell_focus, send_detach, unregister_spawned_herdr_pid,
     wait_for_client_shell_bootstrap, wait_for_message_variant, wait_for_message_variants,
-    CURRENT_ENDPOINT_PROTOCOL_GENERATION as CURRENT_PROTOCOL, SERVER_MESSAGE_PANE_SURFACE,
-    SERVER_MESSAGE_PANE_SURFACE_PATCH,
+    wait_for_socket, CURRENT_ENDPOINT_PROTOCOL_GENERATION as CURRENT_PROTOCOL,
+    SERVER_MESSAGE_PANE_SURFACE, SERVER_MESSAGE_PANE_SURFACE_PATCH,
 };
 
 fn unique_test_dir() -> PathBuf {
@@ -41,7 +41,7 @@ struct SpawnedHerdr {
 impl Drop for SpawnedHerdr {
     fn drop(&mut self) {
         let pid = self.child.process_id();
-        let _ = self.child.kill();
+        support::stop_spawned_herdr(&mut *self.child);
         if let Some(pid) = pid {
             let deadline = Instant::now() + Duration::from_secs(2);
             while Instant::now() < deadline {
@@ -64,17 +64,6 @@ fn test_lock() -> MutexGuard<'static, ()> {
         .unwrap_or_else(|p| p.into_inner())
 }
 
-fn wait_for_socket(path: &Path, timeout: Duration) {
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        if path.exists() && UnixStream::connect(path).is_ok() {
-            return;
-        }
-        thread::sleep(Duration::from_millis(25));
-    }
-    panic!("socket did not appear at {}", path.display());
-}
-
 fn spawn_server(config: &Path, runtime: &Path, api: &Path) -> SpawnedHerdr {
     fs::create_dir_all(config.join("herdr")).unwrap();
     fs::create_dir_all(runtime).unwrap();
@@ -89,6 +78,7 @@ fn spawn_server(config: &Path, runtime: &Path, api: &Path) -> SpawnedHerdr {
         })
         .unwrap();
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
+    support::isolate_herdr_test_process(&mut cmd);
     cmd.arg("server");
     cmd.env("XDG_CONFIG_HOME", config);
     cmd.env("XDG_RUNTIME_DIR", runtime);
@@ -116,6 +106,7 @@ fn spawn_client(config: &Path, runtime: &Path, api: &Path) -> SpawnedHerdr {
         })
         .unwrap();
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
+    support::isolate_herdr_test_process(&mut cmd);
     cmd.arg("client");
     cmd.env("HERDR_DISABLE_SOUND", "1");
     cmd.env("XDG_CONFIG_HOME", config);

@@ -178,6 +178,34 @@ impl App {
             return Vec::new();
         }
 
+        if let AppEvent::RestoredWorktreeSpaceChecked {
+            workspace_id,
+            expected,
+            valid,
+        } = ev
+        {
+            self.pending_restored_worktree_spaces
+                .retain(|(id, space)| id != &workspace_id || space != &expected);
+            let changed_workspace = (!valid)
+                .then(|| {
+                    self.state.workspaces.iter().position(|workspace| {
+                        workspace.id == workspace_id
+                            && workspace.worktree_space.as_ref() == Some(&expected)
+                    })
+                })
+                .flatten();
+            self.state
+                .handle_app_event(AppEvent::RestoredWorktreeSpaceChecked {
+                    workspace_id,
+                    expected,
+                    valid,
+                });
+            if let Some(ws_idx) = changed_workspace {
+                self.emit_workspace_updated(ws_idx);
+            }
+            return Vec::new();
+        }
+
         if let AppEvent::TabBarCommandFinished {
             generation,
             segment_index,
@@ -592,7 +620,13 @@ impl App {
             .terminal_runtimes
             .get(&terminal_id)
             .map(|runtime| runtime.current_size())
-            .unwrap_or_else(|| self.state.estimate_pane_size());
+            .unwrap_or_else(|| {
+                self.state
+                    .new_pane_size(crate::ui::NewPanePlacement::Existing {
+                        ws_idx,
+                        pane: pane_id,
+                    })
+            });
         let Some(launch_env) = self.pane_launch_env(ws_idx, pane_id, Vec::new()) else {
             return false;
         };
@@ -1580,8 +1614,17 @@ mod tests {
             .attached_terminal_id
             .clone();
         let (runtime, _rx) = crate::terminal::TerminalRuntime::test_with_channel(80, 24);
+        #[cfg(unix)]
+        let (runtime, _detection_events) = {
+            let mut runtime = runtime;
+            runtime.test_process_pty_bytes(b"shell prompt");
+            let events = runtime.test_start_basic_detection();
+            runtime.test_wait_for_detection_reads(1).await;
+            (runtime, events)
+        };
+        #[cfg(not(unix))]
         let reset_notify = runtime.agent_detection_reset_notify_for_test();
-        app.terminal_runtimes.insert(terminal_id, runtime);
+        app.terminal_runtimes.insert(terminal_id.clone(), runtime);
 
         let response = app.handle_api_request(crate::api::schema::Request {
             id: "reload_manifests".into(),
@@ -1596,6 +1639,13 @@ mod tests {
             .unwrap()
             .is_empty());
 
+        #[cfg(unix)]
+        app.terminal_runtimes
+            .get(&terminal_id)
+            .unwrap()
+            .test_wait_for_detection_reads(2)
+            .await;
+        #[cfg(not(unix))]
         tokio::time::timeout(
             std::time::Duration::from_millis(50),
             reset_notify.notified(),
@@ -1649,6 +1699,20 @@ mod tests {
 
     #[tokio::test]
     async fn agent_explain_evaluates_with_server_manifest_cache() {
+        // This test asserts against the bundled Codex manifest, so it must not
+        // read the developer's real config directory: a local
+        // agent-detection override there would shadow the bundled rules and
+        // change the expected state.
+        let _guard = crate::config::test_config_env_lock().lock().unwrap();
+        let previous_config_home = std::env::var_os("XDG_CONFIG_HOME");
+        let previous_state_home = std::env::var_os("XDG_STATE_HOME");
+        let isolated =
+            std::env::temp_dir().join(format!("herdr-agent-explain-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&isolated);
+        std::env::set_var("XDG_CONFIG_HOME", isolated.join("config"));
+        std::env::set_var("XDG_STATE_HOME", isolated.join("state"));
+        crate::detect::manifest::reload_manifests();
+
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = App::new(
             &crate::config::Config::default(),
@@ -1690,6 +1754,17 @@ mod tests {
             response["result"]["explain"]["matched_rule"]["id"],
             "live_strong_blocker"
         );
+
+        match previous_config_home {
+            Some(value) => std::env::set_var("XDG_CONFIG_HOME", value),
+            None => std::env::remove_var("XDG_CONFIG_HOME"),
+        }
+        match previous_state_home {
+            Some(value) => std::env::set_var("XDG_STATE_HOME", value),
+            None => std::env::remove_var("XDG_STATE_HOME"),
+        }
+        crate::detect::manifest::reload_manifests();
+        let _ = std::fs::remove_dir_all(&isolated);
     }
 
     #[tokio::test]

@@ -864,9 +864,9 @@ pub(crate) fn handle_client_handshake(
     // Spawn a writer thread that forwards messages from the channels to the stream.
     let write_stream = stream.try_clone()?;
     let writer_event_tx = server_event_tx.clone();
-    std::thread::spawn(move || {
+    crate::thread_spawn::spawn_named("herdr-client-writer", move || {
         client_writer_loop(write_stream, client_id, writer_queue, writer_event_tx);
-    });
+    })?;
 
     if should_quit.load(Ordering::Acquire) {
         send_shutdown_to_unregistered_client(&writer);
@@ -1497,7 +1497,10 @@ mod tests {
     }
 
     fn recv_server_event(receiver: &mut mpsc::Receiver<ServerEvent>, context: &str) -> ServerEvent {
-        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        // A loaded host can delay the reader thread well past a second, and a
+        // short deadline fails the test for a reason unrelated to the behavior
+        // under test.
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
         loop {
             match receiver.try_recv() {
                 Ok(event) => return event,

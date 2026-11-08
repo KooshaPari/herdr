@@ -17,6 +17,17 @@ pub(crate) fn read_fd(fd: std::os::fd::RawFd, data: &mut [u8]) -> std::io::Resul
     }
 }
 
+/// The tty's erase character (VERASE) on stdin, when one is set.
+pub(super) fn terminal_erase_byte() -> Option<u8> {
+    let mut termios: libc::termios = unsafe { std::mem::zeroed() };
+    if unsafe { libc::tcgetattr(libc::STDIN_FILENO, &mut termios) } != 0 {
+        return None;
+    }
+    let erase = termios.c_cc[libc::VERASE];
+    // 0 (Linux) and 0xff (BSD) disable the special character.
+    (erase != 0 && erase != 0xff).then_some(erase)
+}
+
 pub(crate) fn poll_fd_readable(fd: std::os::fd::RawFd, timeout_ms: i32) -> std::io::Result<bool> {
     let mut descriptor = libc::pollfd {
         fd,
@@ -243,6 +254,15 @@ pub(super) fn read_terminal_grid_size() -> std::io::Result<(u16, u16)> {
 }
 
 fn set_sigpipe_disposition(handler: libc::sighandler_t) {
+    // Unit tests share one process across every test in the binary. A CLI print
+    // helper that flips SIGPIPE to SIG_DFL and never restores it leaves the
+    // default disposition installed for later tests, so a test that writes to a
+    // closed socket kills the whole harness instead of failing. The real CLI
+    // keeps the default disposition so a closed stdout still exits via SIGPIPE
+    // (see tests/broken_pipe.rs, which runs the non-test binary).
+    if cfg!(test) {
+        return;
+    }
     let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
     action.sa_sigaction = handler;
     unsafe {
@@ -251,6 +271,127 @@ fn set_sigpipe_disposition(handler: libc::sighandler_t) {
         // fails, stdout retains the existing Rust behavior.
         libc::sigaction(libc::SIGPIPE, &action, std::ptr::null_mut());
     }
+}
+
+extern "C" fn discard_signal(_signal: libc::c_int) {}
+
+/// The server must outlive the terminal or shell that launched it, like tmux.
+/// Installed at process start so SIGHUP cannot stop the server before its event
+/// loop runs. A handler, unlike SIG_IGN, resets to the default on exec, so
+/// child processes keep normal hangup behavior.
+pub(crate) fn ignore_server_hangup() {
+    let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+    action.sa_sigaction = discard_signal as extern "C" fn(libc::c_int) as libc::sighandler_t;
+    action.sa_flags = libc::SA_RESTART;
+    unsafe {
+        libc::sigemptyset(&mut action.sa_mask);
+        libc::sigaction(libc::SIGHUP, &action, std::ptr::null_mut());
+    }
+}
+
+/// Keeps SIGTERM and SIGINT from killing the server with their default
+/// disposition while it is still starting up.
+///
+/// Server startup takes seconds (config load, session restore, plugin
+/// registry). The tokio signal monitor that routes these signals to the
+/// graceful shutdown path only starts once the event loop runs, so a signal
+/// arriving during startup would otherwise kill the process outright and skip
+/// the shutdown log and the final session save.
+///
+/// The handler records the signal instead of discarding it;
+/// [`take_early_termination_signal`] hands it to the shutdown path once the
+/// monitor is up, so the server still stops gracefully.
+pub(crate) fn defer_early_termination_signals() {
+    let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+    action.sa_sigaction =
+        record_early_termination_signal as extern "C" fn(libc::c_int) as libc::sighandler_t;
+    action.sa_flags = libc::SA_RESTART;
+    unsafe {
+        libc::sigemptyset(&mut action.sa_mask);
+        libc::sigaction(libc::SIGTERM, &action, std::ptr::null_mut());
+        libc::sigaction(libc::SIGINT, &action, std::ptr::null_mut());
+    }
+}
+
+/// The signal recorded while the server was still starting up, if any.
+static EARLY_TERMINATION_SIGNAL: std::sync::atomic::AtomicI32 =
+    std::sync::atomic::AtomicI32::new(0);
+
+extern "C" fn record_early_termination_signal(signal: libc::c_int) {
+    // Keep the first signal; a later one of the same kind is the same request.
+    EARLY_TERMINATION_SIGNAL
+        .compare_exchange(
+            0,
+            signal,
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+        )
+        .ok();
+}
+
+/// Returns the termination signal that arrived during startup, if any.
+pub(crate) fn take_early_termination_signal() -> Option<super::ServerQuitSignal> {
+    let recorded = EARLY_TERMINATION_SIGNAL.swap(0, std::sync::atomic::Ordering::AcqRel);
+    match recorded {
+        libc::SIGTERM => Some(super::ServerQuitSignal::Terminate),
+        libc::SIGINT => Some(super::ServerQuitSignal::Interrupt),
+        _ => None,
+    }
+}
+
+/// Routes SIGINT and SIGTERM to `on_quit`, and logs SIGHUP without stopping.
+pub(crate) fn spawn_server_signal_monitor(
+    on_quit: impl Fn(super::ServerQuitSignal) + Send + Sync + 'static,
+) {
+    use tokio::signal::unix::{signal, SignalKind};
+    use tracing::{info, warn};
+
+    let on_quit = std::sync::Arc::new(on_quit);
+    for (kind, quit_signal) in [
+        (SignalKind::interrupt(), super::ServerQuitSignal::Interrupt),
+        (SignalKind::terminate(), super::ServerQuitSignal::Terminate),
+    ] {
+        match signal(kind) {
+            Ok(mut stream) => {
+                let on_quit = on_quit.clone();
+                tokio::spawn(async move {
+                    while stream.recv().await.is_some() {
+                        on_quit(quit_signal);
+                    }
+                });
+            }
+            Err(err) => warn!(%err, signal = %quit_signal, "failed to install server stop handler"),
+        }
+    }
+    match signal(SignalKind::hangup()) {
+        Ok(mut stream) => {
+            tokio::spawn(async move {
+                while stream.recv().await.is_some() {
+                    info!("ignoring SIGHUP; server keeps running");
+                }
+            });
+        }
+        Err(err) => warn!(%err, "failed to install SIGHUP handler"),
+    }
+}
+
+/// Describes the process on the other end of a local socket, for logs.
+pub(crate) fn local_stream_peer_description(stream: &crate::ipc::LocalStream) -> Option<String> {
+    use std::os::fd::{AsFd as _, AsRawFd as _};
+
+    let crate::ipc::LocalStream::UdSocket(socket) = stream;
+    let pid = super::socket_peer_pid(socket.as_fd().as_raw_fd())?;
+    let Some((name, parent)) = super::process_name_and_parent(pid) else {
+        return Some(format!("pid {pid}"));
+    };
+    let mut description = format!("pid {pid} ({name})");
+    if parent > 1 {
+        description.push_str(&format!(", parent pid {parent}"));
+        if let Some((parent_name, _)) = super::process_name_and_parent(parent) {
+            description.push_str(&format!(" ({parent_name})"));
+        }
+    }
+    Some(description)
 }
 
 pub(crate) fn begin_cli_output() {
@@ -479,6 +620,59 @@ pub(crate) fn set_default_plugin_pane_pwd(env: &mut Vec<(String, String)>, cwd: 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cli_output_helpers_do_not_change_sigpipe_disposition_in_tests() {
+        // The test harness shares one process, so a CLI print helper that
+        // installs SIG_DFL would make a later test that writes to a closed
+        // socket kill the whole binary. The helpers must stay inert here.
+        let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+        action.sa_sigaction = libc::SIG_IGN;
+        let mut current: libc::sigaction = unsafe { std::mem::zeroed() };
+        unsafe {
+            libc::sigemptyset(&mut action.sa_mask);
+            libc::sigaction(libc::SIGPIPE, &action, std::ptr::null_mut());
+            libc::sigaction(libc::SIGPIPE, std::ptr::null(), &mut current);
+        }
+        let before = current.sa_sigaction;
+
+        begin_cli_output();
+        end_cli_output();
+
+        let mut after: libc::sigaction = unsafe { std::mem::zeroed() };
+        unsafe {
+            libc::sigaction(libc::SIGPIPE, std::ptr::null(), &mut after);
+        }
+        assert_eq!(
+            after.sa_sigaction, before,
+            "CLI output helpers must not change SIGPIPE inside the test harness"
+        );
+    }
+
+    #[test]
+    fn server_signal_monitor_survives_hangup_and_reports_terminate() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            spawn_server_signal_monitor(move |signal| {
+                let _ = tx.send(signal);
+            });
+
+            // An unhandled SIGHUP would end the test process here.
+            assert_eq!(unsafe { libc::kill(libc::getpid(), libc::SIGHUP) }, 0);
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            assert!(rx.try_recv().is_err());
+
+            assert_eq!(unsafe { libc::kill(libc::getpid(), libc::SIGTERM) }, 0);
+            let signal = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+                .await
+                .unwrap();
+            assert_eq!(signal, Some(super::super::ServerQuitSignal::Terminate));
+        });
+    }
 
     #[test]
     fn plugin_pane_pwd_defaults_to_cwd_without_overriding_explicit_env() {

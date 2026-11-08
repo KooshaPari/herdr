@@ -22,11 +22,11 @@ pub use self::{
         IndexedKeybind, KeyCombo, Keybinds, LiveKeybindConfig,
     },
     model::{
-        validated_sidebar_bounds, AgentPanelSortConfig, Config, ConfigReloadReport,
-        ConfigReloadStatus, HostCursorModeConfig, NewTerminalCwdConfig, PaneBordersConfig,
-        ShellModeConfig, SidebarCollapsedModeConfig, StatusIndicatorStyle, TabBarPositionConfig,
-        ToastClipboardPosition, ToastConfig, ToastDelivery, ToastHerdrPosition,
-        UpdateChannelConfig, MAX_TOAST_DELAY_SECONDS,
+        validated_sidebar_bounds, AgentArgsConfig, AgentPanelSortConfig, Config,
+        ConfigReloadReport, ConfigReloadStatus, HostCursorModeConfig, NewTerminalCwdConfig,
+        PaneBordersConfig, ShellModeConfig, SidebarCollapsedModeConfig, StatusIndicatorStyle,
+        TabBarPositionConfig, ToastClipboardPosition, ToastConfig, ToastDelivery,
+        ToastHerdrPosition, UpdateChannelConfig, MAX_TOAST_DELAY_SECONDS,
     },
     sidebar::{
         AgentSidebarToken, AgentsSidebarConfig, SidebarConfig, SidebarTokenStyle,
@@ -42,6 +42,7 @@ pub(crate) use self::keybinds::parse_key_combo;
 pub(crate) use self::write::{update_file_at, write_edit, ConfigEdit};
 pub(crate) use self::{
     io::upsert_top_level_bool,
+    model::agent_args_diagnostics,
     tab_bar::{
         parse_tab_bar_datetime_format, tab_bar_right_diagnostics,
         MAX_TAB_BAR_COMMAND_INTERVAL_SECONDS, MAX_TAB_BAR_COMMAND_TIMEOUT_SECONDS,
@@ -123,6 +124,7 @@ impl Config {
             .chain(window_title_diagnostics(&self.ui.window_title))
             .chain(self.invalid_sidebar_bounds_diagnostic())
             .chain(self.invalid_headless_size_diagnostic())
+            .chain(agent_args_diagnostics(&self.agents))
             .collect()
     }
 
@@ -199,6 +201,21 @@ pub(crate) fn keybindings_from_profile_toml(profile: &str) -> Result<LiveKeybind
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_keybindings_profile_preserves_plus_prefixes() {
+        let config: Config = toml::from_str(
+            "[keys]\nprefix = [\"ctrl+plus\", \"alt+plus\"]\nnew_tab = \"prefix+plus\"\n",
+        )
+        .unwrap();
+        let profile = config.local_keybindings_profile_toml().unwrap();
+        let restored = keybindings_from_profile_toml(&profile).unwrap();
+        assert_eq!(restored.prefix, config.prefix_keys());
+        assert_eq!(
+            restored.keybinds.new_tab.bindings,
+            config.keybinds().new_tab.bindings
+        );
+    }
 
     #[test]
     fn local_keybindings_profile_includes_defaults_and_excludes_commands() {

@@ -7,6 +7,8 @@ use std::sync::{Mutex, Once, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use portable_pty::CommandBuilder;
+
 static PID_REGISTRY: OnceLock<Mutex<HashSet<u32>>> = OnceLock::new();
 static RUNTIME_DIR_REGISTRY: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
 static INIT: Once = Once::new();
@@ -24,6 +26,11 @@ const CLIENT_MESSAGE_CLIENT_SHELL_PANE_INPUT: u32 = 13;
 const CLIENT_MESSAGE_CLIENT_SHELL_FOCUS: u32 = 18;
 const CLIENT_MESSAGE_ENDPOINT_CONTROL: u32 = 20;
 
+pub fn isolate_herdr_test_process(command: &mut CommandBuilder) {
+    command.env_remove("HERDR_STARTUP_CWD");
+    command.env_remove("HERDR_SESSION");
+}
+
 pub fn register_spawned_herdr_pid(pid: Option<u32>) {
     let Some(pid) = pid else {
         return;
@@ -32,6 +39,19 @@ pub fn register_spawned_herdr_pid(pid: Option<u32>) {
     ensure_cleanup_hooks();
     let mut registry = pid_registry_lock();
     registry.insert(pid);
+}
+
+/// Asks a spawned herdr process to exit. portable-pty's `kill` sends SIGHUP,
+/// which the server deliberately ignores.
+pub fn stop_spawned_herdr(child: &mut (dyn portable_pty::Child + Send + Sync)) {
+    match child.process_id() {
+        Some(pid) => unsafe {
+            libc::kill(pid as libc::pid_t, libc::SIGTERM);
+        },
+        None => {
+            let _ = child.kill();
+        }
+    }
 }
 
 pub fn unregister_spawned_herdr_pid(pid: Option<u32>) {
@@ -93,24 +113,47 @@ pub fn cleanup_test_base(base: &Path) {
     let _ = fs::remove_dir_all(base);
 }
 
+/// How long an integration test waits for a spawned server to publish its
+/// sockets. A saturated host can take well over the old fixed 10 seconds to
+/// schedule and start the server process, so the budget is generous and the
+/// poll interval backs off.
+pub const SERVER_SOCKET_WAIT: Duration = Duration::from_secs(60);
+
+/// Wait for a server socket to accept a connection.
+///
+/// The poll interval grows with the elapsed wait so a saturated host still
+/// gets enough chances to schedule the server process, and the effective
+/// deadline is never shorter than the requested timeout.
 pub fn wait_for_socket(path: &Path, timeout: Duration) {
     let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
+    let mut interval = Duration::from_millis(25);
+    loop {
         if path.exists() && UnixStream::connect(path).is_ok() {
             return;
         }
-        thread::sleep(Duration::from_millis(25));
+        if Instant::now() >= deadline {
+            break;
+        }
+        thread::sleep(interval);
+        // Back off up to 250ms: a busy host needs longer between polls, not
+        // a tighter loop that only adds contention.
+        interval = (interval * 2).min(Duration::from_millis(250));
     }
     panic!("socket did not appear at {}", path.display());
 }
 
 pub fn wait_for_file(path: &Path, timeout: Duration) {
     let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
+    let mut interval = Duration::from_millis(25);
+    loop {
         if path.exists() {
             return;
         }
-        thread::sleep(Duration::from_millis(25));
+        if Instant::now() >= deadline {
+            break;
+        }
+        thread::sleep(interval);
+        interval = (interval * 2).min(Duration::from_millis(250));
     }
     panic!("file did not appear at {}", path.display());
 }
@@ -422,13 +465,19 @@ where
     F: FnMut() -> bool,
 {
     let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
+    let mut interval = interval;
+    loop {
         if predicate() {
             return true;
         }
+        if Instant::now() >= deadline {
+            return false;
+        }
         thread::sleep(interval);
+        // Back off up to 250ms so a saturated host gets real scheduling gaps
+        // between polls instead of a busy loop that adds contention.
+        interval = (interval * 2).min(Duration::from_millis(250));
     }
-    predicate()
 }
 
 pub fn wait_for_message_variant(

@@ -238,7 +238,15 @@ impl App {
             return false;
         }
 
-        let Some(resume_command) = shell_command_from_argv(&plan.argv) else {
+        // Apply the same per-agent config defaults a fresh launch gets, so a
+        // restored session keeps the operator-configured provider/model flags.
+        let resume_argv = {
+            let defaults = crate::detect::parse_agent_label(&plan.agent)
+                .map(|kind| self.agent_default_args_for(kind))
+                .unwrap_or(&[]);
+            resume_argv_with_defaults(&plan.argv, defaults)
+        };
+        let Some(resume_command) = shell_command_from_argv(&resume_argv) else {
             tracing::warn!(
                 pane = pane_id.raw(),
                 terminal = %terminal_id,
@@ -353,6 +361,22 @@ fn stable_terminal_inner_rect(pane_inner: Rect) -> Rect {
     )
 }
 
+/// Prepend config default args after the executable, matching fresh launches.
+/// Empty defaults leave the reported argv untouched.
+fn resume_argv_with_defaults(argv: &[String], defaults: &[String]) -> Vec<String> {
+    if defaults.is_empty() {
+        return argv.to_vec();
+    }
+    let Some((executable, rest)) = argv.split_first() else {
+        return Vec::new();
+    };
+    let mut effective = Vec::with_capacity(1 + defaults.len() + rest.len());
+    effective.push(executable.clone());
+    effective.extend(defaults.iter().cloned());
+    effective.extend(rest.iter().cloned());
+    effective
+}
+
 fn shell_command_from_argv(argv: &[String]) -> Option<String> {
     let mut parts = argv.iter();
     let first = shell_quote(parts.next()?);
@@ -383,6 +407,75 @@ fn shell_quote(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resume_argv_prepends_config_defaults_after_the_executable() {
+        let reported = vec!["codex".to_string(), "resume".to_string(), "abc".to_string()];
+        let defaults = vec!["--model".to_string(), "A".to_string()];
+        assert_eq!(
+            resume_argv_with_defaults(&reported, &defaults),
+            vec!["codex", "--model", "A", "resume", "abc"]
+        );
+    }
+
+    #[test]
+    fn resume_argv_is_unchanged_without_config_defaults() {
+        let reported = vec!["codex".to_string(), "resume".to_string(), "abc".to_string()];
+        assert_eq!(resume_argv_with_defaults(&reported, &[]), reported);
+    }
+
+    /// Mirrors the composition in `start_pending_agent_resume`: config default
+    /// args for the agent kind derived from the saved label must reach the
+    /// resume argv, exactly as they do for a fresh launch.
+    ///
+    /// Calls the production lookup (`crate::app::agents::configured_default_args`)
+    /// rather than a copy of its body, so a change to the lookup shape fails here.
+    #[test]
+    fn resume_argv_applies_config_defaults_for_agent_kind() {
+        use std::collections::BTreeMap;
+
+        let mut configured: BTreeMap<String, crate::config::AgentArgsConfig> = BTreeMap::new();
+        configured.insert(
+            "jcode".to_string(),
+            crate::config::AgentArgsConfig {
+                args: vec!["--model".to_string(), "MiniMax-M3".to_string()],
+            },
+        );
+
+        // Same lookup the production resume path uses.
+        let lookup = |kind: crate::detect::Agent| -> &[String] {
+            crate::app::agents::configured_default_args(&configured, kind)
+        };
+
+        // 1. Configured kind: defaults land between executable and saved args.
+        let plan_argv = vec![
+            "jcode".to_string(),
+            "resume".to_string(),
+            "session-abc".to_string(),
+        ];
+        let defaults = crate::detect::parse_agent_label("jcode")
+            .map(&lookup)
+            .unwrap_or(&[]);
+        assert_eq!(
+            resume_argv_with_defaults(&plan_argv, defaults),
+            vec!["jcode", "--model", "MiniMax-M3", "resume", "session-abc"]
+        );
+
+        // 2. Unconfigured kind: saved argv is returned unchanged.
+        let codex_argv = vec![
+            "codex".to_string(),
+            "resume".to_string(),
+            "session-abc".to_string(),
+        ];
+        let codex_defaults = crate::detect::parse_agent_label("codex")
+            .map(&lookup)
+            .unwrap_or(&[]);
+        assert!(codex_defaults.is_empty());
+        assert_eq!(
+            resume_argv_with_defaults(&codex_argv, codex_defaults),
+            codex_argv
+        );
+    }
 
     #[cfg(unix)]
     fn test_app() -> App {
