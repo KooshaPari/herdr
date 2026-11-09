@@ -137,6 +137,71 @@ impl App {
         })
     }
 
+    fn handle_pane_exit_restore(
+        &mut self,
+        pane_id: crate::layout::PaneId,
+        worktree_restore_failed: bool,
+    ) -> (Vec<crate::app::actions::PaneStateUpdate>, bool) {
+        let mut worktree_restore_updates = Vec::new();
+        if self
+            .state
+            .popup_pane
+            .as_ref()
+            .is_some_and(|popup| popup.pane_id == pane_id)
+        {
+            self.close_popup_pane();
+            return (Vec::new(), true);
+        }
+        if worktree_restore_failed {
+            worktree_restore_updates.extend(self.publish_worktree_runtime_agent_release(pane_id));
+            return (worktree_restore_updates, false);
+        }
+        let expected_exit = self
+            .pending_worktree_remove_runtime_exits
+            .get_mut(&pane_id)
+            .map(|remaining| {
+                *remaining -= 1;
+                *remaining == 0
+            });
+        if let Some(remove_entry) = expected_exit {
+            let restore_failed = if remove_entry {
+                self.pending_worktree_remove_runtime_exits.remove(&pane_id);
+                let restore_requested = self
+                    .pending_worktree_remove_runtime_restores
+                    .remove(&pane_id)
+                    .is_some();
+                if restore_requested {
+                    worktree_restore_updates
+                        .extend(self.publish_worktree_runtime_agent_release(pane_id));
+                }
+                restore_requested && !self.respawn_shell_for_launch_pane(pane_id, false)
+            } else {
+                false
+            };
+            if !restore_failed {
+                return (worktree_restore_updates, true);
+            }
+        }
+        let previous_toast = self.state.toast.clone();
+        if let Some(update) = self
+            .state
+            .publish_pane_process_exit_if_agent(pane_id, false)
+        {
+            self.sync_full_lifecycle_authority_detection_pauses();
+            self.refresh_new_herdr_toast_context_for_update(&update, &previous_toast);
+            self.emit_pane_state_update(&update);
+        }
+        if self.runtime_exit_action(pane_id) == RuntimeExitAction::RespawnShell
+            && self.respawn_shell_for_launch_pane(pane_id, true)
+        {
+            self.overlay_panes.remove(&pane_id);
+            self.render_dirty.request_generic();
+            self.render_notify.notify_one();
+            return (worktree_restore_updates, true);
+        }
+        (worktree_restore_updates, false)
+    }
+
     pub(crate) fn handle_internal_event(&mut self, ev: AppEvent) {
         let _ = self.handle_internal_event_with_pane_updates(ev);
     }
@@ -250,65 +315,14 @@ impl App {
             return self.handle_api_worktree_remove_finished(*result);
         }
 
-        let mut worktree_restore_updates = Vec::new();
-        if let AppEvent::PaneDied { pane_id, .. } = &ev {
-            if self
-                .state
-                .popup_pane
-                .as_ref()
-                .is_some_and(|popup| popup.pane_id == *pane_id)
-            {
-                self.close_popup_pane();
-                return Vec::new();
-            }
-            if worktree_restore_failed {
-                worktree_restore_updates
-                    .extend(self.publish_worktree_runtime_agent_release(*pane_id));
+        let (worktree_restore_updates, handled) =
+            if let AppEvent::PaneDied { pane_id, .. } = &ev {
+                self.handle_pane_exit_restore(*pane_id, worktree_restore_failed)
             } else {
-                let expected_exit = self
-                    .pending_worktree_remove_runtime_exits
-                    .get_mut(pane_id)
-                    .map(|remaining| {
-                        *remaining -= 1;
-                        *remaining == 0
-                    });
-                if let Some(remove_entry) = expected_exit {
-                    let restore_failed = if remove_entry {
-                        self.pending_worktree_remove_runtime_exits.remove(pane_id);
-                        let restore_requested = self
-                            .pending_worktree_remove_runtime_restores
-                            .remove(pane_id)
-                            .is_some();
-                        if restore_requested {
-                            worktree_restore_updates
-                                .extend(self.publish_worktree_runtime_agent_release(*pane_id));
-                        }
-                        restore_requested && !self.respawn_shell_for_launch_pane(*pane_id, false)
-                    } else {
-                        false
-                    };
-                    if !restore_failed {
-                        return worktree_restore_updates;
-                    }
-                }
-                let previous_toast = self.state.toast.clone();
-                if let Some(update) = self
-                    .state
-                    .publish_pane_process_exit_if_agent(*pane_id, false)
-                {
-                    self.sync_full_lifecycle_authority_detection_pauses();
-                    self.refresh_new_herdr_toast_context_for_update(&update, &previous_toast);
-                    self.emit_pane_state_update(&update);
-                }
-                if self.runtime_exit_action(*pane_id) == RuntimeExitAction::RespawnShell
-                    && self.respawn_shell_for_launch_pane(*pane_id, true)
-                {
-                    self.overlay_panes.remove(pane_id);
-                    self.render_dirty.request_generic();
-                    self.render_notify.notify_one();
-                    return worktree_restore_updates;
-                }
-            }
+                (Vec::new(), false)
+            };
+        if handled {
+            return worktree_restore_updates;
         }
 
         let checkpointed_pane_exit = matches!(
