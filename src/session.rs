@@ -1,4 +1,6 @@
-use std::io::{BufRead, BufReader, Write};
+use std::io::Write;
+#[cfg(any(not(windows), test))]
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -6,6 +8,10 @@ use std::time::{Duration, Instant};
 use interprocess::local_socket::traits::Stream as _;
 
 use crate::ipc::LocalStream;
+
+#[cfg(all(test, windows))]
+#[path = "session/stop_response_tests.rs"]
+mod stop_response_tests;
 
 pub const SESSION_ENV_VAR: &str = "HERDR_SESSION";
 pub const DEFAULT_SESSION_NAME: &str = "default";
@@ -285,11 +291,54 @@ fn stop_socket_with_timeout(
         )
     })?;
     let stop_response = send_stop_request(stream, &request, deadline)?;
+    #[cfg(windows)]
+    if let Some(response) = &stop_response {
+        if response.get("id").and_then(|id| id.as_str()) != Some("cli:session:stop") {
+            return Err(
+                "stop outcome unknown: response has an invalid request id; do not retry blindly"
+                    .to_string(),
+            );
+        }
+        if response.get("error").is_none()
+            && response
+                .pointer("/result/type")
+                .and_then(|kind| kind.as_str())
+                != Some("ok")
+        {
+            return Err(
+                "stop outcome unknown: response is not a confirmed success; do not retry blindly"
+                    .to_string(),
+            );
+        }
+        if response.get("error").is_some() && response.get("result").is_some() {
+            return Err("stop outcome unknown: response contains both result and error; do not retry blindly".to_string());
+        }
+    } else {
+        return Err(
+            "stop outcome unknown: no confirmed response; do not retry blindly".to_string(),
+        );
+    }
     if let Some(response) = stop_response {
         if let Some(error) = response.get("error") {
             return Err(error.to_string());
         }
     }
+    #[cfg(windows)]
+    {
+        let uncertain = wait_until_stopped_until(&stopped_socket_paths, deadline);
+        if !uncertain.is_empty() {
+            return Err(format!(
+                "{label} did not stop within {}ms; socket absence could not be confirmed at {}",
+                timeout.as_millis(),
+                uncertain
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+    }
+    #[cfg(not(windows))]
     if !wait_until_stopped_until(&stopped_socket_paths, deadline) {
         let reachable = reachable_socket_paths(&stopped_socket_paths);
         return Err(format!(
@@ -368,11 +417,18 @@ fn send_stop_request(
 
     let response = send_stop_request_inner(&mut stream, request, deadline);
     match response {
-        Ok(Some(line)) => serde_json::from_str(&line)
-            .map(Some)
-            .map_err(|err| err.to_string()),
+        Ok(Some(line)) => serde_json::from_str(&line).map(Some).map_err(|err| {
+            if cfg!(windows) {
+                format!("stop outcome unknown: invalid response: {err}; do not retry blindly")
+            } else {
+                err.to_string()
+            }
+        }),
         Ok(None) => Ok(None),
-        Err(err) if stop_request_error_allows_wait(&err) => Ok(None),
+        Err(err) if cfg!(not(windows)) && stop_request_error_allows_wait(&err) => Ok(None),
+        Err(err) if cfg!(windows) => {
+            Err(format!("stop outcome unknown: {err}; do not retry blindly"))
+        }
         Err(err) => Err(err.to_string()),
     }
 }
@@ -386,22 +442,102 @@ fn send_stop_request_inner(
     stream.write_all(b"\n")?;
     stream.flush()?;
 
-    let Some(read_timeout) = socket_timeout_until(deadline) else {
-        return Ok(None);
-    };
-    if let Err(err) = stream.set_recv_timeout(Some(read_timeout)) {
-        if stop_timeout_error_allows_wait(&err) {
+    #[cfg(windows)]
+    {
+        return read_stop_response_until(stream, deadline).map(Some);
+    }
+    #[cfg(not(windows))]
+    {
+        let Some(read_timeout) = socket_timeout_until(deadline) else {
+            return Ok(None);
+        };
+        if let Err(err) = stream.set_recv_timeout(Some(read_timeout)) {
+            if stop_timeout_error_allows_wait(&err) {
+                return Ok(None);
+            }
+            return Err(err);
+        }
+
+        let mut line = String::new();
+        let bytes_read = BufReader::new(stream).read_line(&mut line)?;
+        if bytes_read == 0 {
             return Ok(None);
         }
-        return Err(err);
+        Ok(Some(line))
     }
+}
 
-    let mut line = String::new();
-    let bytes_read = BufReader::new(stream).read_line(&mut line)?;
-    if bytes_read == 0 {
-        return Ok(None);
+#[cfg(windows)]
+fn read_stop_response_until(
+    stream: &mut LocalStream,
+    deadline: Instant,
+) -> std::io::Result<String> {
+    crate::ipc::set_local_stream_polling(stream, true)?;
+    let mut bytes = Vec::new();
+    let mut chunk = [0u8; 1024];
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "stop response timed out",
+            ));
+        }
+        match crate::ipc::poll_local_stream_read_count(stream, &mut chunk)? {
+            crate::ipc::LocalStreamReadCount::Data(count) => {
+                if let Some(line) = append_stop_response_chunk(&mut bytes, &chunk[..count])? {
+                    if Instant::now() >= deadline {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            "stop response timed out",
+                        ));
+                    }
+                    return Ok(line);
+                }
+            }
+            crate::ipc::LocalStreamReadCount::Pending => {
+                std::thread::sleep(remaining.min(Duration::from_millis(2)));
+            }
+            crate::ipc::LocalStreamReadCount::Closed => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "stop response closed before newline",
+                ));
+            }
+        }
     }
-    Ok(Some(line))
+}
+
+#[cfg(windows)]
+fn append_stop_response_chunk(
+    bytes: &mut Vec<u8>,
+    chunk: &[u8],
+) -> std::io::Result<Option<String>> {
+    const MAX_RESPONSE_BYTES: usize = 64 * 1024;
+    for (index, &byte) in chunk.iter().enumerate() {
+        if byte == b'\n' {
+            if chunk[index + 1..]
+                .iter()
+                .any(|byte| !byte.is_ascii_whitespace())
+            {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "unexpected data after stop response",
+                ));
+            }
+            return String::from_utf8(std::mem::take(bytes))
+                .map(Some)
+                .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err));
+        }
+        if bytes.len() >= MAX_RESPONSE_BYTES {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "stop response too large",
+            ));
+        }
+        bytes.push(byte);
+    }
+    Ok(None)
 }
 
 fn stop_timeout_error_allows_wait(err: &std::io::Error) -> bool {
@@ -425,6 +561,174 @@ fn is_running_at(socket_path: &Path) -> bool {
     socket_path.exists() && crate::ipc::connect_local_stream(socket_path).is_ok()
 }
 
+#[cfg(windows)]
+fn confirmed_absent_after_probe(result: std::io::Result<()>) -> bool {
+    matches!(result, Err(error) if error.raw_os_error() == Some(2))
+}
+
+#[cfg(windows)]
+fn stop_sample_before_deadline(
+    deadline: Instant,
+    mut clock: impl FnMut() -> Instant,
+    probe: impl FnOnce() -> std::io::Result<()>,
+) -> Result<bool, ()> {
+    if clock() >= deadline {
+        return Err(());
+    }
+    let absent = confirmed_absent_after_probe(probe());
+    if clock() >= deadline {
+        return Err(());
+    }
+    Ok(absent)
+}
+
+#[cfg(all(test, windows))]
+#[test]
+fn stop_confirmation_requires_positive_absence() {
+    use std::io::{Error, ErrorKind};
+    assert!(confirmed_absent_after_probe(Err(Error::from_raw_os_error(
+        2
+    ))));
+    assert!(!confirmed_absent_after_probe(Err(Error::from(
+        ErrorKind::NotFound
+    ))));
+    for kind in [
+        ErrorKind::PermissionDenied,
+        ErrorKind::WouldBlock,
+        ErrorKind::TimedOut,
+        ErrorKind::Other,
+    ] {
+        assert!(!confirmed_absent_after_probe(Err(Error::from(kind))));
+    }
+    assert!(!confirmed_absent_after_probe(Ok(())));
+}
+
+#[cfg(all(test, windows))]
+#[test]
+fn stop_confirmation_rejects_probe_at_or_after_deadline() {
+    let start = Instant::now();
+    let deadline = start + Duration::from_secs(1);
+    let calls = std::cell::Cell::new(0);
+    let result = stop_sample_before_deadline(
+        deadline,
+        || {
+            let count = calls.get();
+            calls.set(count + 1);
+            if count == 0 {
+                start
+            } else {
+                deadline
+            }
+        },
+        || Err(std::io::Error::from_raw_os_error(2)),
+    );
+    assert!(result.is_err());
+    let invoked = std::cell::Cell::new(false);
+    let result = stop_sample_before_deadline(
+        deadline,
+        || deadline,
+        || {
+            invoked.set(true);
+            Err(std::io::Error::from_raw_os_error(2))
+        },
+    );
+    assert!(result.is_err());
+    assert!(!invoked.get());
+}
+
+#[cfg(windows)]
+fn wait_until_stopped_until(socket_paths: &[PathBuf], deadline: Instant) -> Vec<PathBuf> {
+    wait_for_windows_stop(
+        socket_paths,
+        deadline,
+        Instant::now,
+        crate::ipc::probe_local_pipe_once,
+        std::thread::sleep,
+    )
+}
+
+#[cfg(windows)]
+fn wait_for_windows_stop(
+    socket_paths: &[PathBuf],
+    deadline: Instant,
+    mut clock: impl FnMut() -> Instant,
+    mut probe: impl FnMut(&Path) -> std::io::Result<()>,
+    mut sleep: impl FnMut(Duration),
+) -> Vec<PathBuf> {
+    loop {
+        let mut uncertain = Vec::new();
+        for path in socket_paths {
+            match stop_sample_before_deadline(deadline, &mut clock, || probe(path)) {
+                Ok(true) => {}
+                Ok(false) => uncertain.push(path.clone()),
+                Err(()) => return socket_paths.to_vec(),
+            }
+        }
+        let now = clock();
+        if now >= deadline {
+            return socket_paths.to_vec();
+        }
+        if uncertain.is_empty() {
+            return uncertain;
+        }
+        sleep(STOP_WAIT_POLL.min(deadline.saturating_duration_since(now)));
+    }
+}
+
+#[cfg(all(test, windows))]
+#[test]
+fn windows_stop_loop_fails_closed_for_unknown_and_expired_samples() {
+    use std::cell::Cell;
+    let now = Instant::now();
+    let deadline = now + Duration::from_secs(1);
+    let paths = vec![
+        PathBuf::from("owned-api-fixture"),
+        PathBuf::from("owned-client-fixture"),
+    ];
+    let result = wait_for_windows_stop(
+        &paths,
+        deadline,
+        || now,
+        |_| Err(std::io::Error::from_raw_os_error(2)),
+        |_| panic!("absent endpoints must not sleep"),
+    );
+    assert!(result.is_empty());
+    for raw in [5, 231] {
+        let time = Cell::new(now);
+        let seen = Cell::new(0);
+        let result = wait_for_windows_stop(
+            &paths,
+            deadline,
+            || time.get(),
+            |path| {
+                seen.set(seen.get() + 1);
+                if path == paths[0] {
+                    Err(std::io::Error::from_raw_os_error(2))
+                } else {
+                    Err(std::io::Error::from_raw_os_error(raw))
+                }
+            },
+            |_| time.set(deadline),
+        );
+        assert_eq!(result, paths);
+        assert_eq!(seen.get(), 2);
+    }
+    let invoked = Cell::new(false);
+    let result = wait_for_windows_stop(
+        &paths,
+        deadline,
+        || deadline,
+        |_| {
+            invoked.set(true);
+            Ok(())
+        },
+        |_| {},
+    );
+    assert_eq!(result, paths);
+    assert!(!invoked.get());
+}
+
+#[cfg(not(windows))]
 fn wait_until_stopped_until(socket_paths: &[PathBuf], deadline: Instant) -> bool {
     while Instant::now() < deadline {
         if socket_paths.iter().all(|path| !is_running_at(path)) {
@@ -435,6 +739,7 @@ fn wait_until_stopped_until(socket_paths: &[PathBuf], deadline: Instant) -> bool
     socket_paths.iter().all(|path| !is_running_at(path))
 }
 
+#[cfg(not(windows))]
 fn reachable_socket_paths(socket_paths: &[PathBuf]) -> Vec<PathBuf> {
     socket_paths
         .iter()
