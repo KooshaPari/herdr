@@ -97,6 +97,33 @@ where
     })
 }
 
+/// Decide which `TERM_PROGRAM` identity a pane's child should advertise.
+///
+/// Pure so it can be tested without touching process-global environment or the
+/// global graphics flag. `None` means "keep herdr's own identity".
+fn child_graphics_identity(
+    graphics_enabled: bool,
+    host_term_program: Option<&str>,
+    host_term_program_version: Option<&str>,
+) -> Option<(String, Option<String>)> {
+    if !graphics_enabled {
+        return None;
+    }
+    let program = host_term_program?;
+    let lowered = program.to_ascii_lowercase();
+    // Only terminals that speak the kitty graphics protocol. Deliberately NOT
+    // wezterm: it advertises sixel, which herdr does not parse or present.
+    let kitty_capable =
+        lowered.contains("kitty") || lowered.contains("ghostty") || lowered.contains("handterm");
+    if !kitty_capable {
+        return None;
+    }
+    Some((
+        program.to_string(),
+        host_term_program_version.map(str::to_string),
+    ))
+}
+
 fn apply_pane_terminal_env(cmd: &mut CommandBuilder) {
     // Each pane is rendered by herdr's own terminal layer, not the outer terminal
     // that launched the app. Advertising the inherited TERM leaks the host terminal
@@ -104,8 +131,30 @@ fn apply_pane_terminal_env(cmd: &mut CommandBuilder) {
     // when the remote side lacks matching terminfo entries.
     cmd.env("TERM", PANE_TERM);
     cmd.env("COLORTERM", PANE_COLORTERM);
-    cmd.env("TERM_PROGRAM", "herdr");
-    cmd.env("TERM_PROGRAM_VERSION", crate::build_info::version());
+    // When graphics are on, the host terminal is what actually renders the image
+    // herdr re-encodes and forwards, so the host identity is the honest
+    // advertisement for a child app picking its image protocol. herdr's own
+    // identity stays visible in the HERDR_* variables.
+    let host_term_program = std::env::var("TERM_PROGRAM").ok();
+    let host_term_program_version = std::env::var("TERM_PROGRAM_VERSION").ok();
+    match child_graphics_identity(
+        crate::kitty_graphics::is_enabled(),
+        host_term_program.as_deref(),
+        host_term_program_version.as_deref(),
+    ) {
+        Some((program, version)) => {
+            cmd.env("TERM_PROGRAM", program);
+            match version {
+                Some(version) => cmd.env("TERM_PROGRAM_VERSION", version),
+                None => cmd.env_remove("TERM_PROGRAM_VERSION"),
+            };
+            cmd.env("HERDR_GRAPHICS", "kitty");
+        }
+        None => {
+            cmd.env("TERM_PROGRAM", "herdr");
+            cmd.env("TERM_PROGRAM_VERSION", crate::build_info::version());
+        }
+    }
     // fish only skips its own resize repaint for terminals it recognizes as
     // reflowing. Herdr reflows too, and the competing repaint glues prompt copies.
     // Match the exact casing: Windows env keys are case-insensitive here, but
@@ -4377,6 +4426,49 @@ mod tests {
             cmd.get_env("TERM_PROGRAM_VERSION"),
             Some(OsStr::new(&crate::build_info::version()))
         );
+    }
+
+    #[test]
+    fn child_graphics_identity_requires_graphics_enabled() {
+        assert_eq!(
+            child_graphics_identity(false, Some("ghostty"), Some("1.2")),
+            None
+        );
+    }
+
+    #[test]
+    fn child_graphics_identity_advertises_kitty_capable_host() {
+        assert_eq!(
+            child_graphics_identity(true, Some("ghostty"), Some("1.2")),
+            Some(("ghostty".to_string(), Some("1.2".to_string())))
+        );
+    }
+
+    #[test]
+    fn child_graphics_identity_accepts_missing_version() {
+        assert_eq!(
+            child_graphics_identity(true, Some("kitty"), None),
+            Some(("kitty".to_string(), None))
+        );
+    }
+
+    #[test]
+    fn child_graphics_identity_rejects_sixel_only_host() {
+        // WezTerm advertises sixel, which herdr does not parse or present.
+        assert_eq!(
+            child_graphics_identity(true, Some("WezTerm"), Some("1")),
+            None
+        );
+    }
+
+    #[test]
+    fn child_graphics_identity_rejects_herdr_itself() {
+        assert_eq!(child_graphics_identity(true, Some("herdr"), None), None);
+    }
+
+    #[test]
+    fn child_graphics_identity_requires_host_identity() {
+        assert_eq!(child_graphics_identity(true, None, None), None);
     }
 
     #[test]
