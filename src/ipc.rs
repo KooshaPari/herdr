@@ -51,6 +51,190 @@ pub(crate) fn connect_local_stream(path: &Path) -> io::Result<LocalStream> {
     }
 }
 
+/// Try one Windows pipe open without waiting for a busy pipe to become free.
+#[cfg(windows)]
+pub(crate) fn probe_local_pipe_once(path: &Path) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE,
+    };
+    use windows_sys::Win32::Storage::FileSystem::{CreateFileW, OPEN_EXISTING};
+
+    let name = path
+        .to_str()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "pipe path is not Unicode"))?;
+    let name = format!(r"\\.\pipe\{name}");
+    let mut wide: Vec<u16> = std::ffi::OsStr::new(&name).encode_wide().collect();
+    if wide.contains(&0) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "pipe name contains NUL",
+        ));
+    }
+    wide.push(0);
+    let handle = unsafe {
+        CreateFileW(
+            wide.as_ptr(),
+            GENERIC_READ | GENERIC_WRITE,
+            0,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            0,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return Err(io::Error::last_os_error());
+    }
+    unsafe { CloseHandle(handle) };
+    Ok(())
+}
+
+#[cfg(all(test, windows))]
+mod stop_probe_fixture_tests {
+    use super::*;
+    use std::ffi::c_void;
+    use std::os::windows::ffi::OsStrExt;
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE,
+    };
+    use windows_sys::Win32::Storage::FileSystem::{CreateFileW, OPEN_EXISTING};
+
+    #[repr(C)]
+    struct SecurityAttributes {
+        len: u32,
+        descriptor: *mut c_void,
+        inherit: i32,
+    }
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn CreateNamedPipeW(
+            name: *const u16,
+            open: u32,
+            mode: u32,
+            instances: u32,
+            out_size: u32,
+            in_size: u32,
+            timeout: u32,
+            security: *const SecurityAttributes,
+        ) -> *mut c_void;
+        fn LocalFree(handle: *mut c_void) -> *mut c_void;
+    }
+    #[link(name = "advapi32")]
+    unsafe extern "system" {
+        fn ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            text: *const u16,
+            revision: u32,
+            descriptor: *mut *mut c_void,
+            size: *mut u32,
+        ) -> i32;
+    }
+    struct Handle(*mut c_void);
+    impl Drop for Handle {
+        fn drop(&mut self) {
+            unsafe {
+                CloseHandle(self.0);
+            }
+        }
+    }
+    struct Descriptor(*mut c_void);
+    impl Drop for Descriptor {
+        fn drop(&mut self) {
+            unsafe {
+                LocalFree(self.0);
+            }
+        }
+    }
+    fn wide(value: &str) -> Vec<u16> {
+        std::ffi::OsStr::new(value)
+            .encode_wide()
+            .chain(Some(0))
+            .collect()
+    }
+    fn name(label: &str) -> String {
+        format!(
+            "herdr-stop-fixture-{}-{label}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        )
+    }
+    fn server(name: &str, security: *const SecurityAttributes) -> Handle {
+        let path = wide(&format!(r"\\.\pipe\{name}"));
+        let raw = unsafe { CreateNamedPipeW(path.as_ptr(), 3, 0, 1, 4096, 4096, 0, security) };
+        assert_ne!(raw, INVALID_HANDLE_VALUE);
+        Handle(raw)
+    }
+
+    #[test]
+    fn owned_windows_pipe_probe_distinguishes_missing_live_busy_and_denied() {
+        let missing = name("missing");
+        assert_eq!(
+            probe_local_pipe_once(Path::new(&missing))
+                .unwrap_err()
+                .raw_os_error(),
+            Some(2)
+        );
+
+        let live = name("live");
+        let _live_server = server(&live, std::ptr::null());
+        assert!(probe_local_pipe_once(Path::new(&live)).is_ok());
+
+        let busy = name("busy");
+        let _busy_server = server(&busy, std::ptr::null());
+        let busy_path = wide(&format!(r"\\.\pipe\{busy}"));
+        let client = unsafe {
+            CreateFileW(
+                busy_path.as_ptr(),
+                GENERIC_READ | GENERIC_WRITE,
+                0,
+                std::ptr::null(),
+                OPEN_EXISTING,
+                0,
+                std::ptr::null_mut(),
+            )
+        };
+        assert_ne!(client, INVALID_HANDLE_VALUE);
+        let _client = Handle(client);
+        assert_eq!(
+            probe_local_pipe_once(Path::new(&busy))
+                .unwrap_err()
+                .raw_os_error(),
+            Some(231)
+        );
+
+        let denied = name("denied");
+        let mut descriptor = std::ptr::null_mut();
+        assert_ne!(
+            unsafe {
+                ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                    wide("D:P(D;;GA;;;WD)").as_ptr(),
+                    1,
+                    &mut descriptor,
+                    std::ptr::null_mut(),
+                )
+            },
+            0
+        );
+        let descriptor = Descriptor(descriptor);
+        let security = SecurityAttributes {
+            len: std::mem::size_of::<SecurityAttributes>() as u32,
+            descriptor: descriptor.0,
+            inherit: 0,
+        };
+        let _denied_server = server(&denied, &security);
+        assert_eq!(
+            probe_local_pipe_once(Path::new(&denied))
+                .unwrap_err()
+                .raw_os_error(),
+            Some(5)
+        );
+    }
+}
+
 pub(crate) fn bind_local_listener(path: &Path) -> io::Result<LocalListener> {
     #[cfg(unix)]
     {

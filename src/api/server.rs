@@ -21,7 +21,9 @@ use crate::ipc::{
     poll_local_stream_read, remove_socket_file_if_owned, set_local_stream_polling,
     socket_file_identity, LocalStream, LocalStreamRead, SocketFileIdentity,
 };
-use crate::server::shutdown::{ServerStop, ShutdownReason};
+#[cfg(test)]
+use crate::server::shutdown::ShutdownReason;
+use crate::server::shutdown::{ApiStopRequest, ServerStop};
 
 #[cfg(test)]
 mod subscription_socket_tests;
@@ -31,6 +33,7 @@ pub(super) const CONNECTION_POLL_INTERVAL: Duration = Duration::from_millis(100)
 pub(super) const APP_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
 const INITIAL_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const STREAM_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+const STOP_RESPONSE_GRACE: Duration = Duration::from_millis(500);
 const MAX_INITIAL_REQUEST_BYTES: usize = 1024 * 1024;
 const ACCEPT_ERROR_BACKOFF: Duration = Duration::from_millis(50);
 
@@ -381,6 +384,22 @@ fn handle_connection_with_stop(
     let changes_ui = request_changes_ui(&request);
     crate::logging::api_request_started(&request_id, method, changes_ui);
 
+    if server_stop.is_some_and(ServerStop::is_unavailable)
+        && !matches!(&request.method, Method::Ping(_) | Method::ServerStop(_))
+    {
+        return finish_wait_response(
+            &mut stream,
+            Some(error_response_json(
+                request_id.clone(),
+                "server_unavailable",
+                "server is shutting down".into(),
+            )),
+            &request_id,
+            method,
+            changes_ui,
+        );
+    }
+
     match request.method {
         #[cfg(unix)]
         Method::ServerSshAgentRegister(params) => {
@@ -581,16 +600,31 @@ fn handle_request(
 
     if matches!(&request.method, Method::ServerStop(_)) {
         if let Some(server_stop) = server_stop {
-            server_stop.request(ShutdownReason::ApiStop {
-                caller: stop_caller,
-            });
+            let outcome = server_stop.request_api_after_response(
+                stop_caller,
+                response_write_complete,
+                STOP_RESPONSE_GRACE,
+            );
+            match outcome {
+                ApiStopRequest::Accepted => {}
+                ApiStopRequest::AlreadyPending => return error_response_json(
+                    request.id,
+                    "server_unavailable",
+                    "server stop is already pending".into(),
+                ),
+                ApiStopRequest::WaiterUnavailable => return error_response_json(
+                    request.id,
+                    "stop_outcome_unknown",
+                    "shutdown requested but response ordering could not be preserved; do not retry blindly".into(),
+                ),
+            }
             return serde_json::to_string(&SuccessResponse {
                 id: request.id,
                 result: ResponseResult::Ok {},
             })
             .unwrap_or_else(|_| "{}".to_string());
         }
-    } else if server_stop.is_some_and(ServerStop::is_requested) {
+    } else if server_stop.is_some_and(ServerStop::is_unavailable) {
         return error_response_json(
             request.id,
             "server_unavailable",
@@ -1579,6 +1613,33 @@ mod tests {
         let rejected: serde_json::Value = serde_json::from_str(&rejected).unwrap();
         assert_eq!(rejected["error"]["code"], "server_unavailable");
         assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn pending_stop_rejects_new_app_requests_before_stop_flag() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let stop = ServerStop::default();
+        let (written, wait) = std::sync::mpsc::channel();
+        assert_eq!(
+            stop.request_api_after_response(None, Some(wait), Duration::from_secs(3)),
+            ApiStopRequest::Accepted
+        );
+        assert!(!stop.is_requested());
+        let response = handle_request(
+            Request {
+                id: "pending_stop".into(),
+                method: Method::WorkspaceList(crate::api::schema::EmptyParams::default()),
+            },
+            &tx,
+            None,
+            Some(&stop),
+            None,
+            None,
+        );
+        let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(response["error"]["code"], "server_unavailable");
+        assert!(rx.try_recv().is_err());
+        written.send(()).unwrap();
     }
 
     #[test]
