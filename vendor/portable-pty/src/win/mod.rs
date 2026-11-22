@@ -6,16 +6,46 @@ use std::pin::Pin;
 use std::sync::Mutex;
 use std::task::{Context, Poll};
 use winapi::shared::minwindef::DWORD;
-use winapi::um::minwinbase::STILL_ACTIVE;
 use winapi::um::processthreadsapi::*;
 use winapi::um::synchapi::WaitForSingleObject;
-use winapi::um::winbase::INFINITE;
+use winapi::um::winbase::{INFINITE, WAIT_FAILED, WAIT_OBJECT_0};
 
 pub mod conpty;
 mod procthreadattr;
 mod psuedocon;
 
 use filedescriptor::OwnedHandle;
+
+const WAIT_TIMEOUT_RESULT: DWORD = 258;
+
+fn termination_result(result: i32, last_error: impl FnOnce() -> IoError) -> IoResult<()> {
+    if result == 0 {
+        Err(last_error())
+    } else {
+        Ok(())
+    }
+}
+
+fn wait_result(result: DWORD, last_error: impl FnOnce() -> IoError) -> IoResult<()> {
+    if result == WAIT_OBJECT_0 {
+        Ok(())
+    } else if result == WAIT_FAILED {
+        Err(last_error())
+    } else {
+        Err(IoError::other(format!(
+            "unexpected process wait result: {result}"
+        )))
+    }
+}
+
+fn poll_wait_result(result: DWORD, last_error: impl FnOnce() -> IoError) -> IoResult<bool> {
+    if result == WAIT_TIMEOUT_RESULT {
+        Ok(false)
+    } else {
+        wait_result(result, last_error)?;
+        Ok(true)
+    }
+}
 
 #[derive(Debug)]
 pub struct WinChild {
@@ -24,36 +54,38 @@ pub struct WinChild {
 
 impl WinChild {
     fn is_complete(&mut self) -> IoResult<Option<ExitStatus>> {
+        let proc = self
+            .proc
+            .lock()
+            .map_err(|_| IoError::other("child process handle lock poisoned"))?
+            .try_clone()?;
+        let waited = unsafe { WaitForSingleObject(proc.as_raw_handle() as _, 0) };
+        if !poll_wait_result(waited, IoError::last_os_error)? {
+            return Ok(None);
+        }
         let mut status: DWORD = 0;
-        let proc = self.proc.lock().unwrap().try_clone().unwrap();
         let res = unsafe { GetExitCodeProcess(proc.as_raw_handle() as _, &mut status) };
         if res != 0 {
-            if status == STILL_ACTIVE {
-                Ok(None)
-            } else {
-                Ok(Some(ExitStatus::with_exit_code(status)))
-            }
+            Ok(Some(ExitStatus::with_exit_code(status)))
         } else {
-            Ok(None)
+            Err(IoError::last_os_error())
         }
     }
 
     fn do_kill(&mut self) -> IoResult<()> {
-        let proc = self.proc.lock().unwrap().try_clone().unwrap();
+        let proc = self
+            .proc
+            .lock()
+            .map_err(|_| IoError::other("child process handle lock poisoned"))?
+            .try_clone()?;
         let res = unsafe { TerminateProcess(proc.as_raw_handle() as _, 1) };
-        let err = IoError::last_os_error();
-        if res != 0 {
-            Err(err)
-        } else {
-            Ok(())
-        }
+        termination_result(res, IoError::last_os_error)
     }
 }
 
 impl ChildKiller for WinChild {
     fn kill(&mut self) -> IoResult<()> {
-        self.do_kill().ok();
-        Ok(())
+        self.do_kill()
     }
 
     fn clone_killer(&self) -> Box<dyn ChildKiller + Send + Sync> {
@@ -70,17 +102,53 @@ pub struct WinChildKiller {
 impl ChildKiller for WinChildKiller {
     fn kill(&mut self) -> IoResult<()> {
         let res = unsafe { TerminateProcess(self.proc.as_raw_handle() as _, 1) };
-        let err = IoError::last_os_error();
-        if res != 0 {
-            Err(err)
-        } else {
-            Ok(())
-        }
+        termination_result(res, IoError::last_os_error)
     }
 
     fn clone_killer(&self) -> Box<dyn ChildKiller + Send + Sync> {
         let proc = self.proc.try_clone().unwrap();
         Box::new(WinChildKiller { proc })
+    }
+}
+
+#[cfg(test)]
+mod termination_result_tests {
+    use super::*;
+
+    #[test]
+    fn successful_termination_does_not_read_stale_error() {
+        assert!(termination_result(1, || panic!("success must not read last error")).is_ok());
+    }
+
+    #[test]
+    fn failed_termination_returns_the_actual_error() {
+        let error = termination_result(0, || IoError::from_raw_os_error(5)).unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(5));
+    }
+
+    #[test]
+    fn wait_failure_and_unexpected_wait_are_not_success() {
+        assert!(wait_result(WAIT_OBJECT_0, || panic!("no error on success")).is_ok());
+        assert_eq!(
+            wait_result(WAIT_FAILED, || IoError::from_raw_os_error(5))
+                .unwrap_err()
+                .raw_os_error(),
+            Some(5)
+        );
+        assert!(wait_result(258, || panic!("unexpected status is not WAIT_FAILED")).is_err());
+    }
+
+    #[test]
+    fn poll_wait_distinguishes_pending_signaled_and_failed() {
+        assert!(!poll_wait_result(WAIT_TIMEOUT_RESULT, || panic!("no error on timeout")).unwrap());
+        assert!(poll_wait_result(WAIT_OBJECT_0, || panic!("no error on success")).unwrap());
+        assert_eq!(
+            poll_wait_result(WAIT_FAILED, || IoError::from_raw_os_error(5))
+                .unwrap_err()
+                .raw_os_error(),
+            Some(5)
+        );
+        assert!(poll_wait_result(42, || panic!("unexpected status is not WAIT_FAILED")).is_err());
     }
 }
 
@@ -90,13 +158,16 @@ impl Child for WinChild {
     }
 
     fn wait(&mut self) -> IoResult<ExitStatus> {
-        if let Ok(Some(status)) = self.try_wait() {
+        if let Some(status) = self.try_wait()? {
             return Ok(status);
         }
-        let proc = self.proc.lock().unwrap().try_clone().unwrap();
-        unsafe {
-            WaitForSingleObject(proc.as_raw_handle() as _, INFINITE);
-        }
+        let proc = self
+            .proc
+            .lock()
+            .map_err(|_| IoError::other("child process handle lock poisoned"))?
+            .try_clone()?;
+        let waited = unsafe { WaitForSingleObject(proc.as_raw_handle() as _, INFINITE) };
+        wait_result(waited, IoError::last_os_error)?;
         let mut status: DWORD = 0;
         let res = unsafe { GetExitCodeProcess(proc.as_raw_handle() as _, &mut status) };
         if res != 0 {
