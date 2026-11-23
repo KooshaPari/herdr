@@ -1022,6 +1022,70 @@ mod tests {
             .to_string()
     }
 
+    /// A saved session where the only agent identity is the session the pane
+    /// reported: no `launch_argv`, no reported `agent_resume`. This is the shape
+    /// a restore actually meets after a restart, and it is what the exact
+    /// `jcode --resume <id>` / `kcode --resume <id>` command must come from.
+    fn snapshot_without_launch_argv(agent: &str, session_id: &str) -> String {
+        let mut snapshot: SessionSnapshot = serde_json::from_str(include_str!(
+            "../../tests/fixtures/session/current-herdr-session.json"
+        ))
+        .unwrap();
+        let pane = snapshot.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&1)
+            .expect("fixture pane");
+        pane.launch_argv = None;
+        pane.agent_resume = None;
+        pane.agent_name = Some(agent.into());
+        pane.agent_session = Some(super::super::snapshot::PaneAgentSessionSnapshot {
+            source: format!("herdr:{agent}"),
+            agent: agent.into(),
+            kind: crate::agent_resume::AgentSessionRefKind::Id,
+            value: session_id.into(),
+        });
+        serde_json::to_string(&snapshot).unwrap()
+    }
+
+    /// The restored command for a saved pane, derived only from the identity
+    /// Herdr recorded. Nothing here reads the argv the pane was first started
+    /// with, because the saved session no longer has one.
+    fn restored_argv_after_a_disk_round_trip(agent: &str, session_id: &str) -> Vec<String> {
+        let text = snapshot_without_launch_argv(agent, session_id);
+        let loaded = super::super::snapshot::parse_snapshot(&text).expect("snapshot loads");
+        let pane = loaded.workspaces[0].tabs[0]
+            .panes
+            .get(&1)
+            .expect("fixture pane survives the round trip");
+        assert!(
+            pane.launch_argv.is_none() && pane.agent_resume.is_none(),
+            "the saved pane must carry no initial argv"
+        );
+        let session = pane.agent_session.as_ref().expect("reported session");
+        let mut resumed = HashSet::new();
+        take_restore_plan_for_snapshot(session, true, &mut resumed)
+            .expect("restore plan")
+            .argv
+    }
+
+    #[test]
+    fn jcode_identity_is_restored_without_the_initial_argv() {
+        let id = "0f3d2c1b-4a59-4e8f-9b1c-2d3e4f5a6b7c";
+        assert_eq!(
+            restored_argv_after_a_disk_round_trip("jcode", id),
+            vec!["jcode", "--resume", id]
+        );
+    }
+
+    #[test]
+    fn kcode_identity_is_restored_without_the_initial_argv() {
+        let id = "0f3d2c1b-4a59-4e8f-9b1c-2d3e4f5a6b7c";
+        assert_eq!(
+            restored_argv_after_a_disk_round_trip("kcode", id),
+            vec!["kcode", "--resume", id]
+        );
+    }
+
     #[cfg(windows)]
     fn test_restore_shell() -> &'static str {
         "C:\\Windows\\System32\\whoami.exe"

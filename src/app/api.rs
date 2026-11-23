@@ -315,12 +315,11 @@ impl App {
             return self.handle_api_worktree_remove_finished(*result);
         }
 
-        let (worktree_restore_updates, handled) =
-            if let AppEvent::PaneDied { pane_id, .. } = &ev {
-                self.handle_pane_exit_restore(*pane_id, worktree_restore_failed)
-            } else {
-                (Vec::new(), false)
-            };
+        let (worktree_restore_updates, handled) = if let AppEvent::PaneDied { pane_id, .. } = &ev {
+            self.handle_pane_exit_restore(*pane_id, worktree_restore_failed)
+        } else {
+            (Vec::new(), false)
+        };
         if handled {
             return worktree_restore_updates;
         }
