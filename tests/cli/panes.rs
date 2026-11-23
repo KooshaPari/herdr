@@ -638,6 +638,91 @@ fn pane_agent_reports_accept_options_before_pane() {
 }
 
 #[test]
+fn pane_agent_reports_carry_exact_jcode_and_kcode_session_identity() {
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let socket_path = runtime_dir.join("herdr.sock");
+
+    let herdr = spawn_herdr(&config_home, &runtime_dir, &socket_path);
+    wait_for_socket(&socket_path, Duration::from_secs(5));
+
+    // Both harnesses resume with `--resume <id>`; the CLI must accept the label
+    // as a known coding agent and keep the session id verbatim. Each gets its own
+    // workspace because a pane's reporter is its hook authority: a second source
+    // may not take over a pane another source already holds.
+    for (index, (agent, session_id)) in [
+        ("jcode", "01J0JCODEIDENTITY000000000"),
+        ("kcode", "01J0KCODEIDENTITY000000000"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let created = send_request(
+            &socket_path,
+            &format!(
+                r#"{{"id":"req_{agent}_identity_{index}","method":"workspace.create","params":{{"cwd":"{}","focus":false}}}}"#,
+                base.display()
+            ),
+        );
+        let pane_id = created["result"]["root_pane"]["pane_id"]
+            .as_str()
+            .expect("workspace.create returns a root pane")
+            .to_string();
+        // The session report is only accepted from the pane's current reporter,
+        // so hold the pane first, exactly as the harness hook does.
+        let hold = run_cli(
+            &socket_path,
+            &[
+                "pane",
+                "report-agent",
+                &pane_id,
+                &format!("--source=herdr:{agent}"),
+                &format!("--agent={agent}"),
+                "--state=idle",
+            ],
+        );
+        assert!(
+            hold.status.success(),
+            "{agent} report-agent stderr: {}",
+            String::from_utf8_lossy(&hold.stderr)
+        );
+
+        let report = run_cli(
+            &socket_path,
+            &[
+                "pane",
+                "report-agent-session",
+                &pane_id,
+                &format!("--source=herdr:{agent}"),
+                &format!("--agent={agent}"),
+                &format!("--agent-session-id={session_id}"),
+                "--session-start-source=startup",
+                "--",
+                agent,
+                "--resume",
+                session_id,
+            ],
+        );
+        assert!(
+            report.status.success(),
+            "{agent} report stderr: {}",
+            String::from_utf8_lossy(&report.stderr)
+        );
+
+        let view = run_cli_json(&socket_path, &["agent", "get", &pane_id]);
+        assert_eq!(view["result"]["agent"]["agent"], agent);
+        let serialized = view.to_string();
+        assert!(
+            serialized.contains(session_id),
+            "{agent} session id missing from agent view: {serialized}"
+        );
+    }
+
+    cleanup_spawned_herdr(herdr, base);
+}
+
+#[test]
 fn pane_read_rejects_invalid_value_with_usage_error() {
     // Invalid option values fail as CLI usage errors before any server
     // contact: exit 2 with the plain parser message, not the old
